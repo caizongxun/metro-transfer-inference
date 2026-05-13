@@ -1,15 +1,16 @@
 """
-path_prob_labeler.py
+path_prob_labeler.py  (OOM 優化版)
 路徑機率標記器：
     對每個 (進站, 出站) OD 對，
     用 path_inference 算出各轉乘站的期望流量貢獻。
 
-輸出格式（用於 ML label 生成）：
-    transfer_station | hour | weekday | expected_flow
-
-這個 label 就是 XGBoost 要學的目標值。
+根本原因不能直接轉為行展開計算：
+    1. path_inference 需要網路圖 G，個別展開体積大
+    2. 每個 OD 對的候選路徑數量有限（K=5），結果可緩存
+    3. 所以於相同 OD 對只計算一次，粘贴到全部時段
 """
 
+import gc
 import pandas as pd
 import numpy as np
 from collections import defaultdict
@@ -22,7 +23,6 @@ def build_transfer_flow_labels(
     od_df: pd.DataFrame,
     G,
     mapping: dict,
-    top_n_od: int = 50
 ) -> pd.DataFrame:
     """
     輸入：含 (日期, 時段, 進站, 出站, 人次) 的 DataFrame
@@ -30,9 +30,13 @@ def build_transfer_flow_labels(
 
     計算方式：
         expected_flow(T) = Σ_{OD} 人次(OD) × P(路徑經過T | OD)
+
+    OOM 優化：
+        - path_prob 對同一 OD 對只計算一次（cache by (origin, dest) 名稱）
+        - 結果直接累積到 aggregation dict，不產生大型中間 DataFrame
+        - 每處理 10k 筆就 gc.collect() 一次
     """
-    # 先對 OD 對快取路徑機率（避免重複計算）
-    path_prob_cache = {}
+    path_prob_cache = {}  # {(origin_name, dest_name): {t_station: prob}}
 
     def get_cached_probs(origin_name, dest_name):
         key = (origin_name, dest_name)
@@ -40,76 +44,54 @@ def build_transfer_flow_labels(
             return path_prob_cache[key]
         oid = name_to_id(origin_name, mapping)
         did = name_to_id(dest_name, mapping)
-        paths = infer_path_probabilities(
-            origin=oid, destination=did,
-            actual_time=None, G=G, k=5
-        )
-        # 整理成 {transfer_station: 機率} dict
+        if oid is None or did is None or oid == did:
+            path_prob_cache[key] = {}
+            return {}
+        try:
+            paths = infer_path_probabilities(
+                origin=oid, destination=did,
+                actual_time=None, G=G, k=5
+            )
+        except Exception:
+            path_prob_cache[key] = {}
+            return {}
         result = defaultdict(float)
         for p in paths:
-            for (sta_a, sta_b) in p["transfer_stations"]:
+            for (_, sta_b) in p.get("transfer_stations", []):
                 result[sta_b] += p["prob"]
         path_prob_cache[key] = dict(result)
         return path_prob_cache[key]
 
-    # 只取有人次的 OD
-    df = od_df[od_df["人次"] > 0].copy()
+    # 累積字典：{(date, hour, transfer_station): expected_flow}
+    agg_dict = defaultdict(float)
 
-    rows = []
+    df = od_df[od_df["人次"] > 0].reset_index(drop=True)
     total = len(df)
-    print(f"  計算標記中，共 {total:,} 筆 OD 紀錄...")
+    print(f"  共 {total:,} 筆 OD，開始產生標記...")
 
-    # 分組逐筆計算
     for i, row in enumerate(df.itertuples(index=False), 1):
-        if i % 50000 == 0:
-            print(f"  進度：{i:,}/{total:,} ({i/total*100:.1f}%)")
+        if i % 20000 == 0:
+            print(f"  進度：{i:,}/{total:,} ({i/total*100:.1f}%) "
+                  f"| cache大小：{len(path_prob_cache)}")
+            gc.collect()
 
-        origin = row.進站
-        dest   = row.出站
-        if origin == dest:
+        transfer_probs = get_cached_probs(row.進站, row.出站)
+        if not transfer_probs:
             continue
 
-        transfer_probs = get_cached_probs(origin, dest)
-        trip_count = row.人次
+        date_str = str(row.日期)[:10]
+        hour     = int(row.時段)
+        trips    = float(row.人次)
 
         for t_station, prob in transfer_probs.items():
-            rows.append({
-                "日期":              str(row.日期)[:10],
-                "hour":             row.時段,
-                "transfer_station": t_station,
-                "origin":           origin,
-                "destination":      dest,
-                "trips":            trip_count,
-                "path_prob":        prob,
-                "expected_flow":    trip_count * prob,
-            })
+            agg_dict[(date_str, hour, t_station)] += trips * prob
 
-    label_df = pd.DataFrame(rows)
+    # 轉成 DataFrame
+    records = [
+        {"日期": k[0], "hour": k[1], "transfer_station": k[2], "expected_flow": v}
+        for k, v in agg_dict.items()
+    ]
+    del agg_dict, path_prob_cache
+    gc.collect()
 
-    # 聚合：同一轉乘站 + 時段 的總期望流量
-    agg = (
-        label_df
-        .groupby(["日期", "hour", "transfer_station"])
-        .agg(expected_flow=("expected_flow", "sum"))
-        .reset_index()
-    )
-    return agg
-
-
-if __name__ == "__main__":
-    import glob
-    from modules.afc_processor import load_od_csv, filter_by_timeslot
-
-    network = load_network()
-    G = build_graph(network)
-    mapping = load_mapping()
-
-    files = sorted(glob.glob("data/od_raw/*.csv"))
-    if not files:
-        print("請先執行 data_fetcher.py")
-    else:
-        df = load_od_csv(files[-1])  # 最新一個月
-        peak = filter_by_timeslot(df, 7, 9)
-        labels = build_transfer_flow_labels(peak, G, mapping)
-        print("\n標記結果（前10行）：")
-        print(labels.sort_values("expected_flow", ascending=False).head(10).to_string(index=False))
+    return pd.DataFrame(records)
