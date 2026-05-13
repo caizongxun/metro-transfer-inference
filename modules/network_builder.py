@@ -1,11 +1,15 @@
 """
 network_builder.py
-建立北捧路網圖，產生候選路徑集合（K-Shortest Paths）
+建立北捷路網圖，產生候選路徑集合（K-Shortest Paths）
 """
 
 import json
 import networkx as nx
 from itertools import islice
+
+# 候選路徑最多允許超出最短路徑幾個站
+# 避免 k-shortest 找出「跑回頭再繞過來」的無意義長路
+MAX_EXTRA_STATIONS = 4
 
 
 def load_network(network_path: str = "data/network.json") -> dict:
@@ -23,25 +27,22 @@ def build_graph(network: dict) -> nx.Graph:
     使用 line_order 確保算出正確的站間順序
     """
     G = nx.Graph()
-    stations     = network["stations"]
-    line_order   = network.get("line_order", {})
+    stations       = network["stations"]
+    line_order     = network.get("line_order", {})
     transfer_times = network.get("transfer_time_minutes", {})
 
-    # 建立節點對照表
     station_map = {s["id"]: s for s in stations}
 
     for s in stations:
         G.add_node(s["id"], name=s.get("name", s["id"]), line=s["line"])
 
-    # 同線站點依序連接（使用 line_order）
-    DEFAULT_RIDE_TIME = 2.0  # 分鐘
+    DEFAULT_RIDE_TIME = 2.0
     for line, ordered_ids in line_order.items():
         for i in range(len(ordered_ids) - 1):
             a, b = ordered_ids[i], ordered_ids[i + 1]
             if a in station_map and b in station_map:
                 G.add_edge(a, b, weight=DEFAULT_RIDE_TIME, edge_type="ride", line=line)
 
-    # 轉乘關係（剩餘不在 line_order 順序中的轉乘）
     for s in stations:
         if "transfer" in s:
             for t_id in s["transfer"]:
@@ -60,21 +61,42 @@ def build_graph(network: dict) -> nx.Graph:
 def get_k_shortest_paths(G: nx.Graph, origin: str, destination: str, k: int = 5) -> list:
     """
     產生 K 條最短路徑（候選路徑集合）
+
+    過濾條件：
+    - 路徑站數不超過最短路徑站數 + MAX_EXTRA_STATIONS
+      → 避免「繞一大圈」的無意義替代路出現在候選集中
+
     回傳: [{"path": [...], "theory_time": float}, ...]
     """
     if origin not in G:
         raise nx.NodeNotFound(f"origin node {origin} not in graph")
     if destination not in G:
         raise nx.NodeNotFound(f"target node {destination} not in graph")
+
     try:
-        paths = list(islice(nx.shortest_simple_paths(G, origin, destination, weight="weight"), k))
+        # 先撈比 k 更多條，再用站數過濾後取前 k 條
+        raw_paths = list(islice(
+            nx.shortest_simple_paths(G, origin, destination, weight="weight"),
+            k * 4  # 先取 4x 候選數量，確保過濾後仍有足夠選擇
+        ))
     except nx.NetworkXNoPath:
         return []
 
+    if not raw_paths:
+        return []
+
+    min_stations = len(raw_paths[0])
+    max_allowed  = min_stations + MAX_EXTRA_STATIONS
+
     result = []
-    for path in paths:
+    for path in raw_paths:
+        if len(path) > max_allowed:
+            continue
         total = sum(G[path[i]][path[i+1]]["weight"] for i in range(len(path)-1))
         result.append({"path": path, "theory_time": total})
+        if len(result) >= k:
+            break
+
     return result
 
 
@@ -93,7 +115,6 @@ if __name__ == "__main__":
     G = build_graph(network)
     print(f"路網建立完成：{G.number_of_nodes()} 站，{G.number_of_edges()} 條邊")
 
-    # 測試：松山機場 → 市政府
     test_paths = get_k_shortest_paths(G, "BR14", "BL17X", k=3)
     for i, p in enumerate(test_paths):
         print(f"路徑 {i+1}: {' -> '.join(p['path'])}，理論時間 {p['theory_time']:.1f} 分鐘")
