@@ -5,6 +5,11 @@ station_mapper.py
 
 import json
 import os
+import sys
+
+# 支援直接執行時路徑修正
+if __name__ == "__main__":
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def load_mapping(mapping_path: str = "data/station_mapping.json") -> dict:
