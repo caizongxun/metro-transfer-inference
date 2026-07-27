@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>北捷轉乘流量推估儀表板</title>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #222536;
+    --border: #2e3249;
+    --text: #e2e4f0;
+    --muted: #8b90a8;
+    --accent: #4f9cf9;
+    --accent2: #f97316;
+    --success: #22c55e;
+    --warn: #eab308;
+    --danger: #ef4444;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: 'Segoe UI', 'Noto Sans TC', sans-serif;
+    font-size: 14px; min-height: 100vh;
+  }
+  header {
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    padding: 14px 24px; display: flex; align-items: center; gap: 16px;
+  }
+  header h1 { font-size: 17px; font-weight: 600; letter-spacing: 0.02em; }
+  .badge {
+    font-size: 11px; padding: 2px 8px; border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  }
+  .badge.private { background: color-mix(in srgb, var(--success) 15%, transparent); color: var(--success); border-color: color-mix(in srgb, var(--success) 30%, transparent); }
+  .badge.warn { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); border-color: color-mix(in srgb, var(--warn) 30%, transparent); }
+  .meta { margin-left: auto; font-size: 11px; color: var(--muted); }
+
+  .layout { display: grid; grid-template-columns: 220px 1fr; height: calc(100vh - 52px); }
+
+  /* Sidebar */
+  .sidebar {
+    background: var(--surface); border-right: 1px solid var(--border);
+    padding: 20px 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px;
+  }
+  .sidebar-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 8px; }
+  .kpi-card {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px 14px;
+  }
+  .kpi-label { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  .kpi-value { font-size: 22px; font-weight: 700; color: var(--text); }
+  .kpi-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .pressure-bar {
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .bar-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .bar-row .label { width: 70px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; color: var(--muted); }
+  .bar-bg { flex: 1; background: var(--border); border-radius: 4px; height: 6px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s ease; }
+  .bar-pct { width: 36px; text-align: right; color: var(--text); }
+
+  /* Main content */
+  .main { display: flex; flex-direction: column; overflow: hidden; }
+  .tabs {
+    display: flex; gap: 0; border-bottom: 1px solid var(--border);
+    background: var(--surface); padding: 0 20px;
+  }
+  .tab {
+    padding: 10px 18px; font-size: 13px; cursor: pointer;
+    border-bottom: 2px solid transparent; color: var(--muted);
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab:hover:not(.active) { color: var(--text); }
+
+  .panel { display: none; flex: 1; overflow: hidden; padding: 16px 20px; flex-direction: column; gap: 16px; }
+  .panel.active { display: flex; }
+
+  .chart-box {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px; flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px;
+  }
+  .chart-box h2 { font-size: 13px; font-weight: 600; color: var(--text); }
+  .chart-box p { font-size: 11px; color: var(--muted); }
+  .chart-container { flex: 1; min-height: 0; }
+
+  /* Timeline slider */
+  .timeline-bar {
+    background: var(--surface); border-top: 1px solid var(--border);
+    padding: 10px 20px; display: flex; align-items: center; gap: 16px;
+  }
+  .timeline-label { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .hour-display { font-size: 20px; font-weight: 700; color: var(--accent); width: 54px; text-align: center; }
+  input[type=range] {
+    flex: 1; accent-color: var(--accent); cursor: pointer;
+    height: 4px;
+  }
+  .play-btn {
+    background: var(--accent); color: #fff; border: none; border-radius: 6px;
+    padding: 6px 14px; font-size: 12px; cursor: pointer; white-space: nowrap;
+    transition: background 0.15s;
+  }
+  .play-btn:hover { background: #3a88e8; }
+  .speed-select {
+    background: var(--surface2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 8px; font-size: 12px; cursor: pointer;
+  }
+
+  .empty-state {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100%; color: var(--muted); gap: 8px; text-align: center;
+  }
+  .empty-state .icon { font-size: 36px; }
+  .empty-state p { max-width: 280px; font-size: 13px; line-height: 1.5; }
+
+  .tooltip-hint { position: fixed; bottom: 70px; right: 24px; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; font-size: 12px; color: var(--muted); max-width: 220px; opacity: 0; transition: opacity 0.3s; pointer-events: none; }
+  .tooltip-hint.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>北捷轉乘流量推估儀表板</h1>
+  <span class="badge" id="sourceBadge">公開資料</span>
+  <span class="badge warn" id="precisionBadge">比例估算模式</span>
+  <span class="meta" id="genTime">—</span>
+</header>
+
+<div class="layout">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div>
+      <div class="sidebar-title">當前時段摘要</div>
+      <div class="kpi-card">
+        <div class="kpi-label">顯示時段</div>
+        <div class="kpi-value" id="kpiHour">—</div>
+        <div class="kpi-sub">拖動下方時間軸切換</div>
+      </div>
+    </div>
+    <div>
+      <div class="kpi-card">
+        <div class="kpi-label">最高承壓站</div>
+        <div class="kpi-value" id="kpiPeakStation" style="font-size:16px">—</div>
+        <div class="kpi-sub" id="kpiPeakRatio">—</div>
+      </div>
+    </div>
+    <div>
+      <div class="kpi-card">
+        <div class="kpi-label">高壓轉乘站</div>
+        <div class="kpi-value" id="kpiHighCount">—</div>
+        <div class="kpi-sub">此時段承壓比 &gt; 15%</div>
+      </div>
+    </div>
+    <div>
+      <div class="sidebar-title">各站承壓比例（此時段）</div>
+      <div class="pressure-bar" id="pressureBarList"></div>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <div class="main">
+    <div class="tabs">
+      <div class="tab active" data-panel="heatmap">轉乘熱力圖</div>
+      <div class="tab" data-panel="flow">各站流量趨勢</div>
+      <div class="tab" data-panel="headway">班距建議</div>
+    </div>
+
+    <!-- Panel: Heatmap -->
+    <div class="panel active" id="panel-heatmap">
+      <div class="chart-box" style="flex:1">
+        <h2>轉乘站 × 時段 承壓熱力圖</h2>
+        <p>顏色越深代表該轉乘站在該時段承接的轉乘比例越高。時間軸滑動可查看當前時段各站分佈。</p>
+        <div class="chart-container" id="heatmapChart"></div>
+      </div>
+    </div>
+
+    <!-- Panel: Flow -->
+    <div class="panel" id="panel-flow">
+      <div class="chart-box" style="flex:1">
+        <h2>各轉乘站全天流量趨勢</h2>
+        <p>各轉乘站在一天中的估計承壓比例變化。以比例呈現，不受絕對人次規模影響。</p>
+        <div class="chart-container" id="flowChart"></div>
+      </div>
+    </div>
+
+    <!-- Panel: Headway -->
+    <div class="panel" id="panel-headway">
+      <div class="chart-box" style="flex:1">
+        <h2>GA 最佳化班距建議（分鐘）</h2>
+        <p>由遺傳演算法最佳化的各路線分時班距建議。目標：在車隊限制下最小化轉乘站加權等待時間。</p>
+        <div class="chart-container" id="headwayChart"></div>
+      </div>
+    </div>
+
+    <!-- Timeline -->
+    <div class="timeline-bar">
+      <span class="timeline-label">時段</span>
+      <span class="hour-display" id="hourDisplay">08:00</span>
+      <input type="range" id="hourSlider" min="6" max="23" value="8" step="1">
+      <button class="play-btn" id="playBtn">▶ 播放</button>
+      <select class="speed-select" id="speedSelect">
+        <option value="800">慢速</option>
+        <option value="500" selected>正常</option>
+        <option value="200">快速</option>
+      </select>
+    </div>
+  </div>
+</div>
+
+<div class="tooltip-hint" id="hint"></div>
+
+<script>
+let DATA = null;
+let playInterval = null;
+let currentHour = 8;
+
+// ── 載入資料 ──────────────────────────────────────
+async function loadData() {
+  try {
+    const res = await fetch('./data.json');
+    if (!res.ok) throw new Error('data.json not found');
+    DATA = await res.json();
+    initDashboard();
+  } catch(e) {
+    showEmpty('尚無資料', '請先執行 python pipeline/run_pipeline.py 產生 data.json');
+  }
+}
+
+function showEmpty(title, msg) {
+  ['heatmapChart','flowChart','headwayChart'].forEach(id => {
+    document.getElementById(id).innerHTML =
+      `<div class="empty-state"><div class="icon">📊</div><strong>${title}</strong><p>${msg}</p></div>`;
+  });
+}
+
+function initDashboard() {
+  // Header badges
+  const src = DATA.data_source === 'private' ? '私有票卡資料' : '公開資料';
+  document.getElementById('sourceBadge').textContent = src;
+  if (DATA.data_source === 'private') {
+    document.getElementById('sourceBadge').className = 'badge private';
+    document.getElementById('precisionBadge').textContent = '精確人次模式';
+    document.getElementById('precisionBadge').className = 'badge private';
+  }
+  if (DATA.generated_at) {
+    document.getElementById('genTime').textContent = '更新：' + DATA.generated_at.replace('T',' ');
+  }
+
+  drawHeatmap();
+  drawFlowChart();
+  drawHeadwayChart();
+  updateSidebar(currentHour);
+}
+
+// ── 熱力圖 ───────────────────────────────────────
+function drawHeatmap() {
+  if (!DATA || !DATA.heatmap_matrix) return;
+  const { stations, hours, values } = DATA.heatmap_matrix;
+  if (!stations.length) { showEmpty('無轉乘站資料','路網中未找到有效轉乘站'); return; }
+
+  // 標記當前時段的垂直線用 shape
+  const shapes = [{
+    type: 'line',
+    x0: currentHour - 0.5, x1: currentHour - 0.5,
+    y0: -0.5, y1: stations.length - 0.5,
+    line: { color: '#f97316', width: 2, dash: 'dot' }
+  }];
+
+  const layout = {
+    paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+    font: { color: '#e2e4f0', family: 'Segoe UI, Noto Sans TC, sans-serif', size: 12 },
+    margin: { t: 10, r: 20, b: 40, l: 110 },
+    xaxis: { title: '時段（小時）', tickmode: 'array', tickvals: hours,
+             ticktext: hours.map(h => h + ':00'), tickfont: { size: 11 },
+             gridcolor: '#2e3249' },
+    yaxis: { tickfont: { size: 11 }, autorange: 'reversed', gridcolor: '#2e3249' },
+    shapes,
+    hoverlabel: { bgcolor: '#1a1d27', bordercolor: '#4f9cf9', font: { color: '#e2e4f0' } }
+  };
+
+  const trace = {
+    type: 'heatmap',
+    z: values,
+    x: hours,
+    y: stations,
+    colorscale: [
+      [0, '#1a1d27'], [0.2, '#1e3a5f'], [0.5, '#1d4ed8'],
+      [0.75, '#f97316'], [1.0, '#ef4444']
+    ],
+    zmin: 0, zmax: 0.35,
+    hovertemplate: '%{y}<br>%{x}:00<br>承壓比例：%{z:.1%}<extra></extra>',
+    showscale: true,
+    colorbar: {
+      tickformat: '.0%', tickfont: { color: '#8b90a8', size: 10 },
+      title: { text: '承壓比例', font: { color: '#8b90a8', size: 11 } },
+      bgcolor: 'transparent', bordercolor: '#2e3249'
+    }
+  };
+
+  Plotly.newPlot('heatmapChart', [trace], layout, { responsive: true, displayModeBar: false });
+}
+
+function updateHeatmapLine(hour) {
+  if (!DATA || !DATA.heatmap_matrix) return;
+  const { stations } = DATA.heatmap_matrix;
+  Plotly.relayout('heatmapChart', {
+    shapes: [{
+      type: 'line',
+      x0: hour - 0.5, x1: hour - 0.5,
+      y0: -0.5, y1: stations.length - 0.5,
+      line: { color: '#f97316', width: 2, dash: 'dot' }
+    }]
+  });
+}
+
+// ── 各站趨勢折線圖 ──────────────────────────────
+function drawFlowChart() {
+  if (!DATA || !DATA.transfer_flow || !DATA.transfer_flow.length) {
+    showEmpty('無流量資料', '請確認 step3 有輸出轉乘站資料');
+    return;
+  }
+
+  const stations = [...new Set(DATA.transfer_flow.map(d => d.transfer_station))];
+  const hours = [...new Set(DATA.transfer_flow.map(d => d.hour))].sort((a,b)=>a-b);
+
+  const palette = ['#4f9cf9','#f97316','#22c55e','#eab308','#ef4444',
+                   '#a855f7','#06b6d4','#ec4899','#84cc16','#f59e0b'];
+
+  const traces = stations.map((st, i) => {
+    const stData = hours.map(h => {
+      const row = DATA.transfer_flow.find(d => d.transfer_station === st && d.hour === h);
+      return row ? row.transfer_ratio : null;
+    });
+    return {
+      type: 'scatter', mode: 'lines+markers',
+      name: st, x: hours.map(h => h + ':00'), y: stData,
+      line: { color: palette[i % palette.length], width: 2 },
+      marker: { size: 5 },
+      hovertemplate: st + ' %{x}<br>承壓比例 %{y:.1%}<extra></extra>',
+      connectgaps: true
+    };
+  });
+
+  const layout = {
+    paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+    font: { color: '#e2e4f0', size: 12 },
+    margin: { t: 10, r: 20, b: 40, l: 60 },
+    xaxis: { title: '時段', gridcolor: '#2e3249', tickfont: { size: 11 } },
+    yaxis: { title: '承壓比例', tickformat: '.0%', gridcolor: '#2e3249', tickfont: { size: 11 } },
+    legend: { bgcolor: 'transparent', font: { size: 11 } },
+    hovermode: 'closest'
+  };
+
+  Plotly.newPlot('flowChart', traces, layout, { responsive: true, displayModeBar: false });
+}
+
+// ── 班距建議圖 ──────────────────────────────────
+function drawHeadwayChart() {
+  if (!DATA || !DATA.headway_plan || !DATA.headway_plan.length) {
+    showEmpty('無班距資料','請確認 step4 GA 最佳化有輸出結果');
+    return;
+  }
+
+  const lines = [...new Set(DATA.headway_plan.map(d => d.line))];
+  const hours = [...new Set(DATA.headway_plan.map(d => d.hour))].sort((a,b)=>a-b);
+  const palette = ['#4f9cf9','#f97316','#22c55e','#eab308','#a855f7'];
+
+  const traces = lines.map((line, i) => {
+    const y = hours.map(h => {
+      const row = DATA.headway_plan.find(d => d.line === line && d.hour === h);
+      return row ? row.suggested_headway_min : null;
+    });
+    return {
+      type: 'scatter', mode: 'lines+markers', name: line,
+      x: hours.map(h => h + ':00'), y,
+      line: { color: palette[i % palette.length], width: 2 },
+      marker: { size: 5 },
+      hovertemplate: line + ' %{x}<br>建議班距 %{y:.1f} 分鐘<extra></extra>',
+      connectgaps: true
+    };
+  });
+
+  const layout = {
+    paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+    font: { color: '#e2e4f0', size: 12 },
+    margin: { t: 10, r: 20, b: 40, l: 60 },
+    xaxis: { title: '時段', gridcolor: '#2e3249', tickfont: { size: 11 } },
+    yaxis: { title: '班距（分鐘）', gridcolor: '#2e3249', tickfont: { size: 11 } },
+    legend: { bgcolor: 'transparent', font: { size: 11 } },
+  };
+
+  Plotly.newPlot('headwayChart', traces, layout, { responsive: true, displayModeBar: false });
+}
+
+// ── Sidebar 更新 ──────────────────────────────────
+function updateSidebar(hour) {
+  document.getElementById('kpiHour').textContent = String(hour).padStart(2,'0') + ':00';
+  if (!DATA || !DATA.transfer_flow) return;
+
+  const hourData = DATA.transfer_flow
+    .filter(d => d.hour === hour)
+    .sort((a,b) => b.transfer_ratio - a.transfer_ratio);
+
+  if (hourData.length === 0) {
+    document.getElementById('kpiPeakStation').textContent = '—';
+    document.getElementById('kpiPeakRatio').textContent = '無資料';
+    document.getElementById('kpiHighCount').textContent = '0';
+    document.getElementById('pressureBarList').innerHTML = '';
+    return;
+  }
+
+  const peak = hourData[0];
+  document.getElementById('kpiPeakStation').textContent = peak.transfer_station;
+  document.getElementById('kpiPeakRatio').textContent =
+    `承壓比例 ${(peak.transfer_ratio * 100).toFixed(1)}%`;
+
+  const highCount = hourData.filter(d => d.transfer_ratio > 0.15).length;
+  document.getElementById('kpiHighCount').textContent = highCount;
+
+  // 承壓條
+  const maxRatio = Math.max(...hourData.map(d => d.transfer_ratio), 0.01);
+  const listEl = document.getElementById('pressureBarList');
+  listEl.innerHTML = hourData.slice(0, 8).map(d => {
+    const pct = (d.transfer_ratio / maxRatio * 100).toFixed(0);
+    const color = d.transfer_ratio > 0.25 ? 'var(--danger)'
+                : d.transfer_ratio > 0.15 ? 'var(--accent2)'
+                : d.transfer_ratio > 0.08 ? 'var(--warn)'
+                : 'var(--success)';
+    return `<div class="bar-row">
+      <span class="label" title="${d.transfer_station}">${d.transfer_station}</span>
+      <div class="bar-bg"><div class="bar-fill" style="width:${pct}%;background:${color}"></div></div>
+      <span class="bar-pct">${(d.transfer_ratio*100).toFixed(0)}%</span>
+    </div>`;
+  }).join('');
+}
+
+// ── 時間軸控制 ────────────────────────────────────
+const slider = document.getElementById('hourSlider');
+const hourDisplay = document.getElementById('hourDisplay');
+const playBtn = document.getElementById('playBtn');
+const speedSelect = document.getElementById('speedSelect');
+
+slider.addEventListener('input', () => {
+  currentHour = parseInt(slider.value);
+  hourDisplay.textContent = String(currentHour).padStart(2,'0') + ':00';
+  updateHeatmapLine(currentHour);
+  updateSidebar(currentHour);
+});
+
+playBtn.addEventListener('click', () => {
+  if (playInterval) {
+    clearInterval(playInterval);
+    playInterval = null;
+    playBtn.textContent = '▶ 播放';
+  } else {
+    playBtn.textContent = '⏸ 暫停';
+    const speed = parseInt(speedSelect.value);
+    playInterval = setInterval(() => {
+      currentHour = currentHour >= 23 ? 6 : currentHour + 1;
+      slider.value = currentHour;
+      hourDisplay.textContent = String(currentHour).padStart(2,'0') + ':00';
+      updateHeatmapLine(currentHour);
+      updateSidebar(currentHour);
+    }, speed);
+  }
+});
+
+// ── Tab 切換 ──────────────────────────────────────
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('panel-' + tab.dataset.panel).classList.add('active');
+  });
+});
+
+// ── 啟動 ──────────────────────────────────────────
+loadData();
+</script>
+</body>
+</html>
