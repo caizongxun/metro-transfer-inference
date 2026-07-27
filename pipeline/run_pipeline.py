@@ -7,7 +7,7 @@ run_pipeline.py
   python pipeline/run_pipeline.py
 
 切換資料來源：
-  修改 pipeline/config.py 中的 DATA_SOURCE = 'private' 即可，其餘不需改動。
+  修改 pipeline/config.py 中的 DATA_SOURCE = 'private' 即可。
 """
 
 import sys
@@ -28,10 +28,9 @@ def main():
     print('\n[Step 1/5] 載入資料...')
     from pipeline.step1_load_data import run as step1_run
     step1_result = step1_run()
-    od_df = step1_result['typical_od']   # 典型日日平均，供後續步驟使用
-    raw_od = step1_result['raw_od']      # 逐日原始資料（保留備用）
+    od_df = step1_result['typical_od']
     print(f'  典型日 OD：{len(od_df):,} 筆，{od_df["origin"].nunique()} 個起站')
-    print(f'  原始資料：{len(raw_od):,} 筆，浵蓋 {raw_od["date"].nunique()} 天')
+    print(f'  資料來源：{step1_result["data_source"]}')
 
     # Step 2: 路網分析
     print('\n[Step 2/5] 路網拓撲分析...')
