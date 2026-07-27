@@ -1,170 +1,164 @@
 """
 public_od_adapter.py
-公開資料介接器：讀取台北市開放資料（臺北捷運每日分時各站OD流量統計資料）
+公開資料介接器—讀取台北捷運每日分時 OD 資料。
 
 真實資料格式（已確認）：
-  欄位：日期, 時段, 進站, 出站, 人次
-  - 日期：2024-01-01 格式
-  - 時段：00~23（字串，需轉 int）
-  - 進站/出站：站名中文
-  - 人次：當日當時段該 OD 的實際人次
+  日期, 時段, 進站, 出站, 人次
 
-標準輸出格式（DataFrame）：
-  columns: origin, destination, hour, trips, date
-  - trips 為真實人次（非比例），可直接加總
+記憶體策略：
+  - chunk 讀取，邊讀邊對 (origin, destination, hour) 做彙整加總
+  - 永遠不將全量原始資料載入記憶體
+  - 最終輸出為 (origin, destination, hour, trips) 平均典型日
 
-切換到私有資料：改用 private_afc_adapter.py，輸出相同欄位格式。
+標準輸出格式：
+  columns: origin, destination, hour, trips
+  trips = 日平均人次
+
+切換到私有資料：改用 private_afc_adapter.py，輸出相同欄位。
 """
 
 import os
 import glob
 import pandas as pd
 import numpy as np
+from collections import defaultdict
 
 
 def load_public_od(od_dir: str = None, od_path: str = None,
-                   filter_years: list = None, filter_yearmonths: list = None) -> pd.DataFrame:
+                   filter_years: list = None, filter_yearmonths: list = None,
+                   chunk_size: int = 50_000) -> pd.DataFrame:
     """
-    讀取公開分時 OD 資料。
-
-    優先順序：
-    1. od_dir 指定目錄 → 自動合併目錄內所有月份 CSV
-    2. od_path 指定單一 CSV
-    3. 以上都找不到 → 使用內建模擬資料（讓 pipeline 可以跑通）
+    讀取公開分時 OD 資料，回傳典型日日平均 DataFrame。
 
     Args:
-        od_dir:  data/od_raw/ 目錄路徑（包含多個月份 CSV）
-        od_path: 單一合併 CSV 路徑（備用）
-        filter_years: 只保留這些年份，例如 [2024]，空 list 代表全部
-        filter_yearmonths: 只保留這些年月，例如 ['202401','202402']，空 list 代表全部
+        od_dir:  data/od_raw/ 目錄
+        od_path: 單一 CSV（備用）
+        filter_years:      只保留這些年份，空 list = 全部
+        filter_yearmonths: 只保留這些年月 (e.g. ['202401'])，空 = 全部
+        chunk_size:        每次讀取行數
 
     Returns:
-        標準格式 DataFrame: origin, destination, hour, trips, date
+        DataFrame: origin, destination, hour, trips (日平均)
     """
-    df = None
-
-    # 優先讀 od_dir
-    if od_dir and os.path.isdir(od_dir):
-        df = _load_from_dir(od_dir)
-    elif od_path and os.path.exists(od_path):
-        df = _load_single_csv(od_path)
-    
-    if df is None or df.empty:
-        print("[Adapter] 找不到公開 OD 資料，使用內建模擬資料")
-        return _generate_sample_od()
-
-    # 篩選年份或年月
-    if filter_yearmonths:
-        df = df[df['yearmonth'].isin(filter_yearmonths)]
-        print(f"[Adapter] 篩選年月 {filter_yearmonths}：剩 {len(df):,} 筆")
-    elif filter_years:
-        df = df[df['year'].isin(filter_years)]
-        print(f"[Adapter] 篩選年份 {filter_years}：剩 {len(df):,} 筆")
-
-    if df.empty:
-        print("[Adapter] 篩選後無資料，使用模擬資料")
-        return _generate_sample_od()
-
-    result = df[['origin', 'destination', 'hour', 'trips', 'date']].copy()
-    print(f"[Adapter] 公開 OD 資料載入完成：{len(result):,} 筆 "
-          f"（{result['date'].nunique()} 天，"
-          f"{result['origin'].nunique()} 個起站）")
-    return result
-
-
-def _load_from_dir(od_dir: str) -> pd.DataFrame:
-    """讀取目錄內所有月份 CSV 並合併"""
-    pattern = os.path.join(od_dir, '*.csv')
-    files = sorted(glob.glob(pattern))
+    # 決定要讀哪些檔案
+    files = _select_files(od_dir, od_path, filter_yearmonths, filter_years)
 
     if not files:
-        print(f"[Adapter] {od_dir} 目錄內無 CSV 檔案")
-        return None
+        print('[Adapter] 找不到對應資料，使用內建模擬資料')
+        return _generate_sample_od()
 
-    print(f"[Adapter] 找到 {len(files)} 個月份檔案，開始合併...")
-    chunks = []
-    for f in files:
+    print(f'[Adapter] 讀取 {len(files)} 個檔案 (chunk={chunk_size:,})…')
+
+    # accumulator: key=(origin, dest, hour) -> (sum_trips, n_days)
+    acc = defaultdict(lambda: [0.0, set()])   # [trips_sum, set_of_dates]
+
+    total_rows = 0
+    for fpath in files:
         try:
-            chunk = _load_single_csv(f)
-            if chunk is not None and not chunk.empty:
-                chunks.append(chunk)
+            for chunk in pd.read_csv(fpath, encoding='utf-8-sig',
+                                     dtype={'時段': str},
+                                     chunksize=chunk_size):
+                chunk.columns = chunk.columns.str.strip()
+                chunk = _rename_columns(chunk)
+                if not {'origin', 'destination', 'hour', 'trips'}.issubset(chunk.columns):
+                    continue
+
+                chunk['trips'] = pd.to_numeric(chunk['trips'], errors='coerce').fillna(0)
+                chunk['hour']  = pd.to_numeric(chunk['hour'],  errors='coerce').fillna(0).astype(int)
+
+                # 收集日期用於後續除以天數
+                if 'date' in chunk.columns:
+                    dates = pd.to_datetime(chunk['date'], errors='coerce')
+                else:
+                    dates = pd.Series([pd.NaT] * len(chunk))
+
+                for _, row in chunk.iterrows():
+                    key = (row['origin'], row['destination'], int(row['hour']))
+                    acc[key][0] += row['trips']
+                    d = dates.iloc[_]
+                    if pd.notna(d):
+                        acc[key][1].add(d.date())
+
+                total_rows += len(chunk)
         except Exception as e:
-            print(f"[Adapter] 跳過 {os.path.basename(f)}：{e}")
+            print(f'[Adapter] 跳過 {os.path.basename(fpath)}: {e}')
 
-    if not chunks:
-        return None
+    if not acc:
+        print('[Adapter] 彙整後無資料，使用模擬資料')
+        return _generate_sample_od()
 
-    df = pd.concat(chunks, ignore_index=True)
-    print(f"[Adapter] 合併完成：{len(df):,} 筆")
+    # 轉為 DataFrame、除以天數得日平均
+    rows = []
+    for (origin, dest, hour), (trips_sum, date_set) in acc.items():
+        n_days = len(date_set) if date_set else 1
+        rows.append({'origin': origin, 'destination': dest,
+                     'hour': hour, 'trips': round(trips_sum / n_days, 2)})
+
+    df = pd.DataFrame(rows)
+    df = df[df['trips'] > 0]
+    print(f'[Adapter] 完成：讀了 {total_rows:,} 行原始資料 '
+          f'→ {len(df):,} 筆典型日彙整 '
+          f'({df["origin"].nunique()} 個起站)')
     return df
 
 
-def _load_single_csv(filepath: str) -> pd.DataFrame:
-    """讀取單一月份 CSV，轉換為標準格式"""
-    df = pd.read_csv(filepath, encoding='utf-8-sig', dtype={'時段': str})
-    df.columns = df.columns.str.strip()
-
-    # 欄位對應（相容不同版本格式）
-    col_map = {
-        '進站': 'origin', '起站': 'origin',
-        '出站': 'destination', '迄站': 'destination',
-        '時段': 'hour', '時間': 'hour',
-        '人次': 'trips', '旅次': 'trips',
-        '日期': 'date',
-    }
-    df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
-
-    required = {'origin', 'destination', 'hour', 'trips'}
-    if not required.issubset(df.columns):
-        missing = required - set(df.columns)
-        raise ValueError(f"缺少欄位：{missing}")
-
-    df['trips'] = pd.to_numeric(df['trips'], errors='coerce').fillna(0)
-    df['hour'] = pd.to_numeric(df['hour'], errors='coerce').fillna(0).astype(int)
-
-    # 保留 date 欄位，衍生 year / yearmonth
-    if 'date' in df.columns:
-        df['date'] = pd.to_datetime(df['date'], errors='coerce')
-        df['year'] = df['date'].dt.year
-        df['yearmonth'] = df['date'].dt.strftime('%Y%m')
-    else:
-        df['date'] = pd.NaT
-        df['year'] = None
-        df['yearmonth'] = None
-
-    return df[['origin', 'destination', 'hour', 'trips', 'date', 'year', 'yearmonth']]
-
-
+# 即 aggregate_to_typical_day 的別名，供 step1 import
 def aggregate_to_typical_day(df: pd.DataFrame) -> pd.DataFrame:
     """
-    將多日資料彙整為「典型日」（各 OD × 時段 的日平均人次）。
-    用於熱力圖和 GA 最佳化的輸入。
-
-    Returns:
-        DataFrame: origin, destination, hour, trips（日平均）
+    將已含 date 欄位的 raw_od 彙整為典型日。
+    主要用於 private adapter 回傳的資料。
+    公開資料已在 load_public_od 內部完成彙整。
     """
+    if 'date' not in df.columns:
+        return df[['origin', 'destination', 'hour', 'trips']]
     n_days = df['date'].nunique()
     if n_days == 0:
         n_days = 1
-
-    agg = (
-        df.groupby(['origin', 'destination', 'hour'])['trips']
-        .sum()
-        .reset_index()
-    )
+    agg = (df.groupby(['origin', 'destination', 'hour'])['trips']
+             .sum().reset_index())
     agg['trips'] = (agg['trips'] / n_days).round(2)
-    agg = agg[agg['trips'] > 0]  # 過濾零流量
-    print(f"[Adapter] 典型日彙整：{n_days} 天平均，{len(agg):,} 筆有效 OD 紀錄")
+    agg = agg[agg['trips'] > 0]
     return agg
 
 
-def _generate_sample_od() -> pd.DataFrame:
-    """
-    當公開資料尚未下載時，用合理的模擬資料讓 pipeline 可以跑通。
-    模擬北捷主要 OD 對 + 真實時段分佈形狀（早晚尖峰）。
-    """
-    np.random.seed(42)
+# ---- 內部工具函數 ------------------------------------------------
 
+def _select_files(od_dir, od_path, filter_yearmonths, filter_years):
+    """???????????????????????????????????????????????????????????????"""  # noqa
+    files = []
+    if od_dir and os.path.isdir(od_dir):
+        all_files = sorted(glob.glob(os.path.join(od_dir, '*.csv')))
+        if filter_yearmonths:
+            files = [f for f in all_files
+                     if any(ym in os.path.basename(f) for ym in filter_yearmonths)]
+            print(f'[Adapter] 年月篩選 {filter_yearmonths}: '
+                  f'{len(files)}/{len(all_files)} 個檔案')
+        elif filter_years:
+            files = [f for f in all_files
+                     if any(str(y) in os.path.basename(f) for y in filter_years)]
+            print(f'[Adapter] 年份篩選 {filter_years}: '
+                  f'{len(files)}/{len(all_files)} 個檔案')
+        else:
+            files = all_files
+            print(f'[Adapter] 全部 {len(files)} 個檔案')
+    elif od_path and os.path.exists(od_path):
+        files = [od_path]
+    return files
+
+
+def _rename_columns(df: pd.DataFrame) -> pd.DataFrame:
+    col_map = {
+        '進站': 'origin',  '起站': 'origin',
+        '出站': 'destination', '迄站': 'destination',
+        '時段': 'hour',   '時間': 'hour',
+        '人次': 'trips',  '旅次': 'trips',
+        '日期': 'date',
+    }
+    return df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
+
+
+def _generate_sample_od() -> pd.DataFrame:
+    np.random.seed(42)
     od_pairs = [
         ('台北車站', '忠孝復興'), ('忠孝復興', '台北車站'),
         ('台北車站', '南京復興'), ('南京復興', '台北車站'),
@@ -174,26 +168,21 @@ def _generate_sample_od() -> pd.DataFrame:
         ('淡水', '台北車站'), ('台北車站', '淡水'),
         ('南勢角', '忠孝復興'), ('忠孝復興', '南勢角'),
         ('動物園', '大安'), ('大安', '動物園'),
-        ('新北投', '台北車站'), ('台北車站', '新北投'),
         ('松山', '板橋'), ('板橋', '松山'),
     ]
-
     hour_weights = {
         6: 0.03, 7: 0.10, 8: 0.13, 9: 0.09, 10: 0.05,
         11: 0.04, 12: 0.05, 13: 0.04, 14: 0.04, 15: 0.04,
         16: 0.06, 17: 0.10, 18: 0.12, 19: 0.08, 20: 0.05,
         21: 0.04, 22: 0.03, 23: 0.01,
     }
-
     rows = []
     for origin, dest in od_pairs:
         base = np.random.randint(800, 3000)
         for hour, weight in hour_weights.items():
             trips = round(base * weight * (1 + np.random.normal(0, 0.05)))
             rows.append({'origin': origin, 'destination': dest,
-                         'hour': hour, 'trips': max(0, trips),
-                         'date': pd.NaT, 'year': None, 'yearmonth': None})
-
+                         'hour': hour, 'trips': max(0, trips)})
     df = pd.DataFrame(rows)
-    print(f"[Adapter] 使用模擬 OD 資料（{len(od_pairs)} 個 OD 對，{len(df)} 筆）")
+    print(f'[Adapter] 使用模擬 OD 資料（{len(od_pairs)} 個 OD 對，{len(df)} 筆）')
     return df
