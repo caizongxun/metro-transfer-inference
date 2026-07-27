@@ -26,12 +26,15 @@ def main():
 
     # Step 1: 載入資料
     print('\n[Step 1/5] 載入資料...')
-    from pipeline.step1_load_data import load_od_data
-    od_df = load_od_data()
-    print(f'  OD 資料：{len(od_df):,} 筆，{od_df["origin"].nunique()} 個起站')
+    from pipeline.step1_load_data import run as step1_run
+    step1_result = step1_run()
+    od_df = step1_result['typical_od']   # 典型日日平均，供後續步驟使用
+    raw_od = step1_result['raw_od']      # 逐日原始資料（保留備用）
+    print(f'  典型日 OD：{len(od_df):,} 筆，{od_df["origin"].nunique()} 個起站')
+    print(f'  原始資料：{len(raw_od):,} 筆，浵蓋 {raw_od["date"].nunique()} 天')
 
     # Step 2: 路網分析
-    print('\n[Step 2/5] 路網拓樸分析...')
+    print('\n[Step 2/5] 路網拓撲分析...')
     from pipeline.step2_network_analysis import load_network_graph, load_station_mapping, analyze_od_dataframe
     G = load_network_graph()
     mapping = load_station_mapping()
@@ -63,8 +66,8 @@ def main():
         headway_df = pd.DataFrame()
         print('  無轉乘流量資料，跳過 GA')
 
-    # Step 5: 匯出
-    print('\n[Step 5/5] 匯出 JSON...')
+    # Step 5: 匙出
+    print('\n[Step 5/5] 匙出 JSON...')
     from pipeline.step5_export import export_to_json
     export_to_json(flow_df, heatmap_df, headway_df)
 
