@@ -25,35 +25,50 @@ from pipeline.config import (
     HEADWAY_MIN, HEADWAY_MAX, ANALYSIS_HOURS, PRESSURE_THRESHOLD
 )
 
-# 北捷主要路線（可依實際調整）
-LINES = ['板南線', '淡水信義線', '中和新蘆線', '松山新店線', '文湖線']
+# 北捷主要路線
+LINES = ['板南線', '淡水信義線', '中和新薊線', '松山新店線', '文湖線']
 N_HOURS = len(ANALYSIS_HOURS)
 
-# 各路線每班次容量（估算，滿載約 1000 人）
+# 各路線每班次容量（估算，滿載約1000人）
 LINE_CAPACITY = {
-    '板南線': 1000, '淡水信義線': 1000, '中和新蘆線': 900,
-    '松山新店線': 900, '文湖線': 400  # 文湖線為中運量
+    '板南線': 1000, '淡水信義線': 1000, '中和新薊線': 900,
+    '松山新店線': 900, '文湖線': 400
 }
+
+# ANALYSIS_HOURS 的首尾，用於 clamp
+_HOUR_MIN = min(ANALYSIS_HOURS)
+_HOUR_MAX = max(ANALYSIS_HOURS)
 
 
 def decode_individual(individual: list) -> dict:
     """
-    將個體解碼為 {line: {hour: headway}} 的巢狀 dict
+    將個體解碼為 {line: {hour: headway}} 的巢狀 dict。
+    key 全部為 int。
     """
     result = {}
     for i, line in enumerate(LINES):
         result[line] = {}
         for j, hour in enumerate(ANALYSIS_HOURS):
             val = individual[i * N_HOURS + j]
-            result[line][hour] = max(HEADWAY_MIN, min(HEADWAY_MAX, round(val, 1)))
+            result[line][int(hour)] = max(HEADWAY_MIN, min(HEADWAY_MAX, round(val, 1)))
     return result
+
+
+def _lookup_headway(headway_plan: dict, line: str, hour) -> float:
+    """
+    安全查詢班距：若 hour 不在 ANALYSIS_HOURS 內，
+    clamp 到最近的已知時段。
+    """
+    h = int(hour)
+    h_clamped = max(_HOUR_MIN, min(_HOUR_MAX, h))
+    return headway_plan[line][h_clamped]
 
 
 def fitness(individual: list, flow_df: pd.DataFrame):
     """
     適應度函數（最小化）：
     1. 加權等待時間：各轉乘站 × 時段的 estimated_trips × (headway/2)
-    2. 超載懲罰：若某站某時段的承壓比例超過閾值，加大懲罰
+    2. 超載懲罰：承壓比例超過閾値時加大懲罰
     """
     headway_plan = decode_individual(individual)
     total_wait = 0.0
@@ -64,13 +79,11 @@ def fitness(individual: list, flow_df: pd.DataFrame):
         trips = row['estimated_trips']
         ratio = row['transfer_ratio']
 
-        # 簡化：用所有路線的平均班距計算等待時間
-        avg_headway = np.mean([headway_plan[line][hour] for line in LINES])
+        # 用安全查詢，避免 hour 超出 ANALYSIS_HOURS 範圍導致 KeyError
+        avg_headway = np.mean([_lookup_headway(headway_plan, line, hour) for line in LINES])
         total_wait += trips * (avg_headway / 2)
 
-        # 超載懲罰
         if ratio > PRESSURE_THRESHOLD:
-            # 超載越嚴重懲罰越重
             overload_penalty += trips * (ratio - PRESSURE_THRESHOLD) * 100
 
     return (total_wait + overload_penalty,)
@@ -82,7 +95,6 @@ def run_ga(flow_df: pd.DataFrame, verbose: bool = True) -> dict:
     """
     n_genes = len(LINES) * N_HOURS
 
-    # 避免重複定義（Jupyter 重跑時會報錯）
     if 'FitnessMin' in creator.__dict__:
         del creator.FitnessMin
     if 'Individual' in creator.__dict__:
@@ -135,7 +147,6 @@ def headway_to_dataframe(headway_plan: dict) -> pd.DataFrame:
 
 
 if __name__ == '__main__':
-    # 用假資料快速測試 GA 能跑
     sample_flow = pd.DataFrame([
         {'transfer_station': '台北車站', 'hour': 8, 'estimated_trips': 500, 'transfer_ratio': 0.20},
         {'transfer_station': '忠孝復興', 'hour': 8, 'estimated_trips': 300, 'transfer_ratio': 0.12},
