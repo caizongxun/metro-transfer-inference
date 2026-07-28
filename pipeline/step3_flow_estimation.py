@@ -2,11 +2,14 @@
 step3_flow_estimation.py
 轉乘站分時流量估算。
 
-transfer_ratio 定義：該站該時段旅次 在全路網所有（站, 時段）組合中的 percentile rank
-語意：0% = 流量屬全路網最低，100% = 流量屬全路網最高
+transfer_ratio 定義：
+  營運時段（6:00~23:00）內，該站該時段旅次在全路網所有（站, 時段）組合的 percentile rank
+  深夜時段（0:00~5:00）直接設為 0，不參與百分位計算
+
 優點：
-  1. 小站大站顏色會有意義的差異（台北車站 vs 七張在同時段不再同色）
-  2. 熱力圖顏色分佈會自然拉開，不會全紅
+  - 營運時段 18 小時的細格經歷完整 0~100% 色彩分佈
+  - 小站（七張）vs 大站（台北車站）在同時段顏色會有有意義的差異
+  - 深夜盡管定義為發車時段也行，轉乘量本來就很少
 """
 
 import sys
@@ -17,14 +20,18 @@ import pandas as pd
 import numpy as np
 from pipeline.config import ANALYSIS_HOURS, PRESSURE_THRESHOLD
 
+# 營運時段定義：6:00 以後才參與 percentile rank
+_OPERATING_HOUR_MIN = 6
+
 
 def estimate_transfer_flow(path_df: pd.DataFrame) -> pd.DataFrame:
     """
     向量化展開：每筆路徑的 transfer_stations list → explode → groupby 彙整。
 
-    transfer_ratio 定義：全路網 percentile rank
-      - 小站小時段會是低百分位，大站尖峰時段會是高百分低
-      - 熱力圖顏色分佈不會全部堤唯在最高值
+    transfer_ratio 計算流程：
+      1. 深夜時段（hour < 6）：ratio = 0
+      2. 營運時段（hour >= 6）：對所有 (station, hour) 的 estimated_trips 做 percentile rank
+         語意：這個格子的轉乘量在營運時段內全路網所有記錄裡排第 X %
     """
     has_transfer = path_df['transfer_stations'].apply(
         lambda x: isinstance(x, list) and len(x) > 0
@@ -50,16 +57,21 @@ def estimate_transfer_flow(path_df: pd.DataFrame) -> pd.DataFrame:
         .rename(columns={'trips': 'estimated_trips'})
     )
 
-    # --- 全路網 percentile rank ---
-    # 每個 (station, hour) 的 estimated_trips 在所有組合中的百分位排名
-    # 語意：這個站這個時段的人流，在全路網所有轉乘記錄裡排第幾%
-    flow['transfer_ratio'] = (
-        flow['estimated_trips']
-        .rank(pct=True, method='average')
-        .round(4)
-    )
+    # --- 分兩段計算 transfer_ratio ---
+    is_operating = flow['hour'] >= _OPERATING_HOUR_MIN
 
-    # pressure_level 改為四分位數切分
+    # 深夜時段直接為 0
+    flow['transfer_ratio'] = 0.0
+
+    # 營運時段：對營運時段內所有 (station, hour) 的 trips 做 percentile rank
+    if is_operating.any():
+        operating_trips = flow.loc[is_operating, 'estimated_trips']
+        flow.loc[is_operating, 'transfer_ratio'] = (
+            operating_trips
+            .rank(pct=True, method='average')
+            .round(4)
+        )
+
     flow['pressure_level'] = pd.cut(
         flow['transfer_ratio'],
         bins=[0, 0.25, 0.50, 0.75, 1.0],
@@ -96,8 +108,10 @@ if __name__ == '__main__':
          'transfer_stations': ['古亭'], 'path_prob': 0.8},
         {'origin': 'C', 'destination': 'E', 'hour': 17, 'trips': 300,
          'transfer_stations': ['古亭'], 'path_prob': 0.8},
+        {'origin': 'D', 'destination': 'F', 'hour': 2,  'trips': 5,
+         'transfer_stations': ['台北車站'], 'path_prob': 1.0},
     ])
     flow = estimate_transfer_flow(sample)
-    print(flow)
+    print(flow.to_string())
     print('\nheatmap matrix:')
     print(build_heatmap_matrix(flow))
