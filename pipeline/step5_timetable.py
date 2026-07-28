@@ -73,16 +73,17 @@ def generate_timetable(
         train_idx = 1
         while t < 60:
             abs_minute = hour * 60 + t
-            h_disp = abs_minute // 60
-            m_disp = abs_minute % 60
+            # 明確轉成 int，避免 float format 錯誤
+            h_disp = int(abs_minute) // 60
+            m_disp = int(abs_minute) % 60
             # 只保留 6:00 ~ 23:59
-            if 6 * 60 <= abs_minute < 24 * 60:
+            if 6 * 60 <= int(abs_minute) < 24 * 60:
                 rows.append({
                     'line':           line,
                     'hour':           hour,
                     'train_index':    train_idx,
                     'depart_time_str': f'{h_disp:02d}:{m_disp:02d}',
-                    'depart_minute':  abs_minute,
+                    'depart_minute':  int(abs_minute),
                     'headway_min':    round(hw, 1),
                     'offset_min':     round(offset, 2),
                 })
