@@ -2,15 +2,29 @@
 public_od_adapter.py
 效能關鍵：全向量化 groupby/sum，移除 apply(lambda)
 checkpoint: 每處理完一個檔案存一次，不自動删除，需手動呼叫 clear_checkpoint()
+
+memory: dates_acc 改存 int（不重複日期數量）而非 set，防止大月份 OOM
+         每處理完一個檔案檢查 RAM，超過 11 GB 強制 GC
 """
 
 import os
+import gc
 import glob
 import pickle
 import pandas as pd
 import numpy as np
 
 CHECKPOINT_PATH = 'pipeline/data/checkpoint_acc.pkl'
+RAM_LIMIT_GB = 11.0  # 超過此間距觸發 GC
+
+
+def _rss_gb() -> float:
+    """Return current process RSS in GB. Returns 0 if psutil not available."""
+    try:
+        import psutil
+        return psutil.Process(os.getpid()).memory_info().rss / (1024 ** 3)
+    except Exception:
+        return 0.0
 
 
 def load_public_od(od_dir: str = None, od_path: str = None,
@@ -22,8 +36,9 @@ def load_public_od(od_dir: str = None, od_path: str = None,
         print('[Adapter] 找不到對應資料，使用內建模擬資料')
         return _generate_sample_od()
 
-    trips_acc = {}
-    dates_acc = {}
+    trips_acc  = {}   # key -> float  累計旅次
+    dates_acc  = {}   # key -> int    不重複日期數（用 hyperloglog 近似 或 set 大小）
+                      # 此處改為每個 key 每個檔案只對 unique_dates 做 count 累加
     done_files = set()
     total_rows = 0
 
@@ -35,10 +50,15 @@ def load_public_od(od_dir: str = None, od_path: str = None,
             dates_acc  = ckpt.get('dates_acc', {})
             done_files = ckpt.get('done_files', set())
             total_rows = ckpt.get('total_rows', 0)
+            # 對舊格式 checkpoint（dates_acc 值是 set）做片段延伸
+            for k, v in dates_acc.items():
+                if isinstance(v, set):
+                    dates_acc[k] = len(v)
             print(f'[Adapter] 載入 checkpoint：已處理 {len(done_files)} 個檔案，'
                   f'{total_rows:,} 行，{len(trips_acc):,} 個 key')
         except Exception as e:
             print(f'[Adapter] checkpoint 讀取失敗 ({e})，重新開始')
+            trips_acc, dates_acc, done_files, total_rows = {}, {}, set(), 0
 
     pending = [f for f in files if os.path.basename(f) not in done_files]
     print(f'[Adapter] 待處理 {len(pending)}/{len(files)} 個檔案 (chunk={chunk_size:,})')
@@ -53,8 +73,10 @@ def load_public_od(od_dir: str = None, od_path: str = None,
         fname = os.path.basename(fpath)
         try:
             file_rows = 0
+            file_date_sets = {}  # key -> set[date_str]  僅在單一檔案處理期間存在
+
             for chunk in pd.read_csv(fpath, encoding='utf-8-sig',
-                                     dtype={'時段': str}, chunksize=chunk_size):
+                                     dtype={'\u6642\u6bb5': str}, chunksize=chunk_size):
                 chunk = chunk.copy()
                 chunk.columns = chunk.columns.str.strip()
                 chunk = _rename_columns(chunk)
@@ -67,9 +89,11 @@ def load_public_od(od_dir: str = None, od_path: str = None,
                     chunk['date'] = pd.to_datetime(chunk['date'], errors='coerce').dt.strftime('%Y-%m-%d')
                 else:
                     chunk['date'] = None
+
                 grp_trips = chunk.groupby(['origin', 'destination', 'hour'], sort=False)['trips'].sum()
                 for key, val in grp_trips.items():
                     trips_acc[key] = trips_acc.get(key, 0.0) + float(val)
+
                 if chunk['date'].notna().any():
                     grp_dates = (
                         chunk[chunk['date'].notna()]
@@ -77,15 +101,29 @@ def load_public_od(od_dir: str = None, od_path: str = None,
                         .unique()
                     )
                     for key, arr in grp_dates.items():
-                        if key in dates_acc:
-                            dates_acc[key].update(arr.tolist())
+                        if key in file_date_sets:
+                            file_date_sets[key].update(arr.tolist())
                         else:
-                            dates_acc[key] = set(arr.tolist())
+                            file_date_sets[key] = set(arr.tolist())
+
                 file_rows += len(chunk)
+                del chunk
+
+            # 檔案處理完成：將 set 折疊為 int 再累加，釋放 set 記憶體
+            for key, s in file_date_sets.items():
+                dates_acc[key] = dates_acc.get(key, 0) + len(s)
+            del file_date_sets
+            gc.collect()
 
             total_rows += file_rows
             done_files.add(fname)
-            print(f'  [{fname[-14:-4]}] {file_rows:,} 行 ✓')
+            rss = _rss_gb()
+            print(f'  [{fname[-14:-4]}] {file_rows:,} 行 ✓  RAM={rss:.1f}GB')
+
+            # RAM 警戒
+            if rss > RAM_LIMIT_GB:
+                print(f'  [Adapter] RAM {rss:.1f}GB > {RAM_LIMIT_GB}GB，強制 GC...')
+                gc.collect()
 
             os.makedirs(os.path.dirname(CHECKPOINT_PATH), exist_ok=True)
             with open(CHECKPOINT_PATH, 'wb') as f:
@@ -99,7 +137,7 @@ def load_public_od(od_dir: str = None, od_path: str = None,
         return _generate_sample_od()
 
     keys   = list(trips_acc.keys())
-    n_days = [len(dates_acc[k]) if k in dates_acc and dates_acc[k] else 1 for k in keys]
+    n_days = [dates_acc.get(k, 1) or 1 for k in keys]
     df = pd.DataFrame({
         'origin':      [k[0] for k in keys],
         'destination': [k[1] for k in keys],
@@ -109,14 +147,13 @@ def load_public_od(od_dir: str = None, od_path: str = None,
     })
     df = df[df['trips'] > 0]
 
-    # 不自動删除 checkpoint，需手動呼叫 clear_checkpoint()
     print(f'[Adapter] 完成：{total_rows:,} 行 → {len(df):,} 筆典型日'
           f' ({df["origin"].nunique()} 個起站)')
     return df
 
 
 def clear_checkpoint():
-    """手動清除 step1 checkpoint，下次執行會從頭重跑"""
+    """\u624b動清除 step1 checkpoint，下次執行會從頭重距"""
     if os.path.exists(CHECKPOINT_PATH):
         os.remove(CHECKPOINT_PATH)
         print(f'[Adapter] 已清除 {CHECKPOINT_PATH}')
