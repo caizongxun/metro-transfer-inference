@@ -13,9 +13,13 @@ Step 3.5 — 用各站進出人次觀測值校正 estimated_trips
      scale_factor = observed_total / estimated_total
      corrected_trips = estimated_trips * scale_factor（per station）
 
-  2. 上界截斷（cap）
+  2. 上界截斷（cap）【需要分時進出人次資料才能啟用】
      corrected_trips 不能超過該站該時段的 observed_total
      （轉乘人次不可能超過進出站總人次）
+     ⚠ 若 ridership_raw 只有年度/月度彙總資料，_load_roc_format 會把
+       全日人次均攤給 24 小時，此時 cap 會把高峰時段截斷成和離峰一樣，
+       導致圖表出現平線。請使用 disable_hourly_cap=True（預設值）跳過此步驟，
+       或補充分時進出人次 CSV 後再啟用。
 
 注意：
   - 若某站在進出人次資料中找不到對應名稱，scale_factor 設 1.0（不校正）
@@ -29,6 +33,7 @@ Step 3.5 — 用各站進出人次觀測值校正 estimated_trips
      欄位：統計期, 捷運站別, 進站人次, 出站人次[, 增減率欄位（自動忽略）]
      統計期為「85年」「113年1月」等民國年字串
      → 自動取最近年份資料，全日平均分配給各小時
+     ⚠ 此格式僅能做量級校正，上界截斷必須 disable_hourly_cap=True
   3. 一般日期版
      欄位：日期, 站名, 進站人次, 出站人次
 
@@ -170,6 +175,10 @@ def _load_roc_format(df: pd.DataFrame) -> pd.DataFrame:
     處理北捷公開資料格式：
       統計期（民國年）, 捷運站別, 進站人次, 出站人次[, 增減率欄位...]
     取最近年份資料，全日平均分配給各小時。
+
+    ⚠ 警告：此格式無分時資訊，每小時的 total_passengers 為全日均攤值。
+      若使用上界截斷（disable_hourly_cap=False），高峰時段的 estimated_trips
+      會被截斷成與離峰相同，導致圖表平線。請保持 disable_hourly_cap=True（預設）。
     """
     stat_col    = next(c for c in df.columns if '統計期' in c)
     station_col = next(c for c in df.columns if '捷運站別' in c)
@@ -184,6 +193,8 @@ def _load_roc_format(df: pd.DataFrame) -> pd.DataFrame:
     latest_year = df['_roc_year'].max()
     df = df[df['_roc_year'] == latest_year].copy()
     print(f'  [Step3.5] 進出人次資料使用民國 {int(latest_year)} 年資料')
+    print(f'  [Step3.5] ⚠ 年度彙總格式：每小時值為全日均攤，'
+          f'上界截斷已停用（disable_hourly_cap=True）以避免圖表平線')
 
     df[entry_col] = pd.to_numeric(df[entry_col], errors='coerce').fillna(0)
     df[exit_col]  = pd.to_numeric(df[exit_col],  errors='coerce').fillna(0)
@@ -278,7 +289,23 @@ def _build_name_map(flow_stations: list, ridership_stations: list) -> dict:
 def calibrate(
     flow_df: pd.DataFrame,
     ridership_dir: str = _DEFAULT_RIDERSHIP_DIR,
+    disable_hourly_cap: bool = True,
 ) -> pd.DataFrame:
+    """
+    校正 estimated_trips。
+
+    Parameters
+    ----------
+    flow_df : pd.DataFrame
+        step3 輸出，需含 transfer_station, hour, estimated_trips 欄位。
+    ridership_dir : str
+        進出人次 CSV 所在目錄。
+    disable_hourly_cap : bool, default True
+        True  → 只做量級校正（scale_factor），跳過上界截斷。
+                 適用於 ridership_raw 只有年度/月度彙總資料的情況。
+        False → 同時執行上界截斷。
+                 ⚠ 需配合分時進出人次資料使用，否則會造成圖表平線。
+    """
     if flow_df.empty:
         return flow_df
 
@@ -327,24 +354,28 @@ def calibrate(
     result['scale_factor'] = result['transfer_station'].map(scale_map).fillna(1.0)
     result['estimated_trips'] = (result['estimated_trips'] * result['scale_factor']).round(2)
 
-    # 上界截斷
-    ridership_hour = ridership.copy()
-    reverse_map = {}
-    for fs, rs in name_map.items():
-        reverse_map.setdefault(rs, fs)  # 取第一個對應
-    ridership_hour['transfer_station'] = ridership_hour['station_name'].map(reverse_map)
-    ridership_hour = ridership_hour.dropna(subset=['transfer_station'])
-    ridership_hour = ridership_hour.rename(columns={'total_passengers': 'obs_hour_total'})
+    # 上界截斷（僅在 disable_hourly_cap=False 且有分時資料時執行）
+    if not disable_hourly_cap:
+        print('  [Step3.5] 執行上界截斷（disable_hourly_cap=False）')
+        ridership_hour = ridership.copy()
+        reverse_map = {}
+        for fs, rs in name_map.items():
+            reverse_map.setdefault(rs, fs)  # 取第一個對應
+        ridership_hour['transfer_station'] = ridership_hour['station_name'].map(reverse_map)
+        ridership_hour = ridership_hour.dropna(subset=['transfer_station'])
+        ridership_hour = ridership_hour.rename(columns={'total_passengers': 'obs_hour_total'})
 
-    result = result.merge(
-        ridership_hour[['transfer_station', 'hour', 'obs_hour_total']],
-        on=['transfer_station', 'hour'], how='left'
-    )
-    has_obs = result['obs_hour_total'].notna()
-    result.loc[has_obs, 'estimated_trips'] = result.loc[has_obs].apply(
-        lambda r: min(r['estimated_trips'], r['obs_hour_total']), axis=1
-    )
-    result = result.drop(columns=['obs_hour_total'])
+        result = result.merge(
+            ridership_hour[['transfer_station', 'hour', 'obs_hour_total']],
+            on=['transfer_station', 'hour'], how='left'
+        )
+        has_obs = result['obs_hour_total'].notna()
+        result.loc[has_obs, 'estimated_trips'] = result.loc[has_obs].apply(
+            lambda r: min(r['estimated_trips'], r['obs_hour_total']), axis=1
+        )
+        result = result.drop(columns=['obs_hour_total'])
+    else:
+        print('  [Step3.5] 上界截斷已停用（disable_hourly_cap=True），僅執行量級校正')
 
     # 重算 transfer_ratio — 絕對正規化（trips / max(trips)），與 step3 一致
     # percentile rank 已移除：rank 保證均勻分佈，校正後時段差異會被抹平
@@ -401,6 +432,6 @@ if __name__ == '__main__':
         ]).to_csv(ridership_csv, index=False, encoding='utf-8-sig')
 
         result = calibrate(sample_flow, ridership_dir=tmpdir)
-        print('\n校正結果：')
+        print('\n校正結果（disable_hourly_cap=True，預設）：')
         print(result[['transfer_station', 'hour', 'pre_calibration_trips',
                        'estimated_trips', 'scale_factor', 'transfer_ratio']].to_string())
