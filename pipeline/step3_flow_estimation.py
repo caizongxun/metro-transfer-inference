@@ -2,7 +2,8 @@
 step3_flow_estimation.py
 轉乘站分時流量估算。
 
-修正：移除 iterrows（在 24 萬筆上極慢），改用 explode + groupby 向量化。
+transfer_ratio 改為：該站該時段旅次 / 該站全天最高旅次
+（原本是全部轉乘站的占比，導致所有站永遠跟其他站比，無法反映單站真實乘載狀態）
 """
 
 import sys
@@ -17,9 +18,10 @@ from pipeline.config import ANALYSIS_HOURS, PRESSURE_THRESHOLD
 def estimate_transfer_flow(path_df: pd.DataFrame) -> pd.DataFrame:
     """
     向量化展開：每筆路徑的 transfer_stations list → explode → groupby 彙整。
-    比 iterrows 快 100x+。
+
+    transfer_ratio 定義：該站該時段旅次 / 該站全天最高時段旅次
+    語意：0% = 實際上沒人，100% = 達到該站自己的當天峰値
     """
-    # 只保留有轉乘站的筆
     has_transfer = path_df['transfer_stations'].apply(
         lambda x: isinstance(x, list) and len(x) > 0
     )
@@ -31,7 +33,6 @@ def estimate_transfer_flow(path_df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=['transfer_station', 'hour', 'estimated_trips',
                                      'transfer_ratio', 'pressure_level'])
 
-    # explode list → 每個轉乘站一行
     expanded = df.explode('transfer_stations').rename(
         columns={'transfer_stations': 'transfer_station'}
     )
@@ -45,12 +46,22 @@ def estimate_transfer_flow(path_df: pd.DataFrame) -> pd.DataFrame:
         .rename(columns={'trips': 'estimated_trips'})
     )
 
-    hour_total = flow.groupby('hour')['estimated_trips'].transform('sum')
-    flow['transfer_ratio'] = (flow['estimated_trips'] / hour_total.replace(0, np.nan)).round(4)
+    # --- 改為跟同站自己全天峰値比較 ---
+    # peak_trips[station] = 該站在所有時段中的最高旅次
+    station_peak = (
+        flow.groupby('transfer_station')['estimated_trips']
+        .max()
+        .rename('peak_trips')
+    )
+    flow = flow.join(station_peak, on='transfer_station')
+    flow['transfer_ratio'] = (
+        flow['estimated_trips'] / flow['peak_trips'].replace(0, np.nan)
+    ).round(4).fillna(0)
+    flow.drop(columns='peak_trips', inplace=True)
 
     flow['pressure_level'] = pd.cut(
         flow['transfer_ratio'],
-        bins=[0, 0.05, PRESSURE_THRESHOLD, 0.30, 1.0],
+        bins=[0, 0.40, 0.65, 0.85, 1.0],
         labels=['低', '中', '高', '極高'],
         include_lowest=True
     )
