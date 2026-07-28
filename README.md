@@ -44,7 +44,7 @@ metro-transfer-inference/
 
 公開補充：
 - 臺北捷運各站分時進出量統計 OD：https://data.taipei/dataset/detail?id=63f31c7e-7fc3-418b-bd82-b95158755b4d
-- 臺北捷運各站進出人次：https://data.taipei/dataset/detail?id=178ebf06-0451-4ac1-bbba-c255ca1fdac6
+- 臺北捷運旅運量：https://www.metro.taipei/cp.aspx?n=FF31501BEBDD0136
 
 ---
 
