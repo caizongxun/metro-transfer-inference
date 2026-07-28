@@ -1,7 +1,7 @@
 """
 export_static.py
-把 data.json inline 進 index.html，產出完全自包含的靜態 HTML。
-適用於無法開 HTTP server 的環境（Lightning AI、Colab、等）。
+把 data.json 與 timetable_summary.json inline 進 index.html，
+產出完全自包含的靜態 HTML。
 
 執行：
   python pipeline/export_static.py
@@ -11,10 +11,11 @@ export_static.py
 import os
 import json
 
-DASHBOARD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dashboard')
-DATA_PATH     = os.path.join(DASHBOARD_DIR, 'data.json')
-TEMPLATE_PATH = os.path.join(DASHBOARD_DIR, 'index.html')
-OUTPUT_PATH   = os.path.join(DASHBOARD_DIR, 'dashboard_output.html')
+DASHBOARD_DIR   = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dashboard')
+DATA_PATH       = os.path.join(DASHBOARD_DIR, 'data.json')
+TIMETABLE_PATH  = os.path.join('data', 'output', 'timetable_summary.json')
+TEMPLATE_PATH   = os.path.join(DASHBOARD_DIR, 'index.html')
+OUTPUT_PATH     = os.path.join(DASHBOARD_DIR, 'dashboard_output.html')
 
 
 def build_static_html():
@@ -30,17 +31,29 @@ def build_static_html():
     with open(DATA_PATH, encoding='utf-8') as f:
         data = json.load(f)
 
+    # 讀入時刻表 JSON（若不存在則為空 dict）
+    timetable = {}
+    if os.path.exists(TIMETABLE_PATH):
+        with open(TIMETABLE_PATH, encoding='utf-8') as f:
+            timetable = json.load(f)
+        print(f'[Export] 時刻表資料：{TIMETABLE_PATH} ({len(timetable)} 條路線)')
+    else:
+        print(f'[Export] 找不到 {TIMETABLE_PATH}，時刻表頁籤將顯示空狀態')
+
     with open(TEMPLATE_PATH, encoding='utf-8') as f:
         html = f.read()
 
-    # 將 fetch('./data.json') 的非同步載入改為直接嵌入資料
-    # 找到 loadData() 函數，整個换採
-    inline_script = f'<script>\nlet _INLINE_DATA = {json.dumps(data, ensure_ascii=False)};\n</script>'
+    # 同時 inline 兩份資料
+    inline_script = (
+        f'<script>\n'
+        f'let _INLINE_DATA = {json.dumps(data, ensure_ascii=False)};\n'
+        f'let _INLINE_TIMETABLE = {json.dumps(timetable, ensure_ascii=False)};\n'
+        f'</script>'
+    )
 
-    # 在 </head> 前插入 inline data
     html = html.replace('</head>', f'{inline_script}\n</head>', 1)
 
-    # 改寫 loadData() ：直接用 _INLINE_DATA 而不是 fetch
+    # 改寫 loadData()
     old_load = '''async function loadData() {
   try {
     const res = await fetch('./data.json');
@@ -55,6 +68,7 @@ def build_static_html():
     new_load = '''async function loadData() {
   if (typeof _INLINE_DATA !== 'undefined') {
     DATA = _INLINE_DATA;
+    TIMETABLE = (typeof _INLINE_TIMETABLE !== 'undefined') ? _INLINE_TIMETABLE : {};
     initDashboard();
     return;
   }
@@ -62,6 +76,10 @@ def build_static_html():
     const res = await fetch('./data.json');
     if (!res.ok) throw new Error('data.json not found');
     DATA = await res.json();
+    try {
+      const tr = await fetch('../data/output/timetable_summary.json');
+      TIMETABLE = tr.ok ? await tr.json() : {};
+    } catch(_) { TIMETABLE = {}; }
     initDashboard();
   } catch(e) {
     showEmpty('尚無資料', '請先執行 python pipeline/run_pipeline.py 產生 data.json');
@@ -71,11 +89,10 @@ def build_static_html():
     if old_load in html:
         html = html.replace(old_load, new_load)
     else:
-        # fallback: template 版本已變，用注訋區塊替換
         print('[Export] Warning: loadData() 樣式不匹配，改用 fallback 插入')
         html = html.replace(
             'loadData();',
-            'if(typeof _INLINE_DATA!=="undefined"){DATA=_INLINE_DATA;initDashboard();}else{loadData();}',
+            'if(typeof _INLINE_DATA!=="undefined"){DATA=_INLINE_DATA;TIMETABLE=(typeof _INLINE_TIMETABLE!=="undefined")?_INLINE_TIMETABLE:{};initDashboard();}else{loadData();}',
             1
         )
 

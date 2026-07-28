@@ -54,9 +54,7 @@
   .kpi-label { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
   .kpi-value { font-size: 22px; font-weight: 700; color: var(--text); }
   .kpi-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
-  .pressure-bar {
-    display: flex; flex-direction: column; gap: 6px;
-  }
+  .pressure-bar { display: flex; flex-direction: column; gap: 6px; }
   .bar-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
   .bar-row .label { width: 70px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; color: var(--muted); }
   .bar-bg { flex: 1; background: var(--border); border-radius: 4px; height: 6px; overflow: hidden; }
@@ -95,10 +93,7 @@
   }
   .timeline-label { font-size: 12px; color: var(--muted); white-space: nowrap; }
   .hour-display { font-size: 20px; font-weight: 700; color: var(--accent); width: 54px; text-align: center; }
-  input[type=range] {
-    flex: 1; accent-color: var(--accent); cursor: pointer;
-    height: 4px;
-  }
+  input[type=range] { flex: 1; accent-color: var(--accent); cursor: pointer; height: 4px; }
   .play-btn {
     background: var(--accent); color: #fff; border: none; border-radius: 6px;
     padding: 6px 14px; font-size: 12px; cursor: pointer; white-space: nowrap;
@@ -109,6 +104,55 @@
     background: var(--surface2); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 4px 8px; font-size: 12px; cursor: pointer;
   }
+
+  /* Timetable panel */
+  .tt-controls {
+    display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+  }
+  .tt-controls label { font-size: 12px; color: var(--muted); }
+  .tt-select {
+    background: var(--surface2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 10px; font-size: 12px; cursor: pointer;
+  }
+  .tt-summary {
+    display: flex; gap: 12px; flex-wrap: wrap;
+  }
+  .tt-kpi {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 14px; min-width: 110px;
+  }
+  .tt-kpi-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  .tt-kpi-value { font-size: 18px; font-weight: 700; color: var(--accent); margin-top: 2px; }
+  .tt-scroll {
+    flex: 1; overflow-y: auto; min-height: 0;
+  }
+  .tt-table {
+    width: 100%; border-collapse: collapse; font-size: 12px;
+  }
+  .tt-table th {
+    background: var(--surface2); color: var(--muted);
+    padding: 6px 10px; text-align: left; font-weight: 500;
+    position: sticky; top: 0; border-bottom: 1px solid var(--border);
+  }
+  .tt-table td {
+    padding: 5px 10px; border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+    font-variant-numeric: tabular-nums;
+  }
+  .tt-table tr:hover td { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+  .peak-row td { color: var(--accent2); }
+  .tt-hour-group {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(52px, 1fr));
+    gap: 6px;
+    padding: 4px 0;
+  }
+  .tt-chip {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 6px; font-size: 11px;
+    text-align: center; font-variant-numeric: tabular-nums;
+    color: var(--text);
+  }
+  .tt-chip.peak { border-color: var(--accent2); color: var(--accent2); }
 
   .empty-state {
     display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -131,7 +175,6 @@
 </header>
 
 <div class="layout">
-  <!-- Sidebar -->
   <aside class="sidebar">
     <div>
       <div class="sidebar-title">當前時段摘要</div>
@@ -161,12 +204,12 @@
     </div>
   </aside>
 
-  <!-- Main -->
   <div class="main">
     <div class="tabs">
       <div class="tab active" data-panel="heatmap">轉乘熱力圖</div>
       <div class="tab" data-panel="flow">各站流量趨勢</div>
       <div class="tab" data-panel="headway">班距建議</div>
+      <div class="tab" data-panel="timetable">時刻表</div>
     </div>
 
     <!-- Panel: Heatmap -->
@@ -196,6 +239,25 @@
       </div>
     </div>
 
+    <!-- Panel: Timetable -->
+    <div class="panel" id="panel-timetable">
+      <div class="chart-box" style="flex:1; overflow:hidden;">
+        <h2>完整時刻表（Step 5T 輸出）</h2>
+        <p>由 GA 班距 + 換乘偏移推算的每條路線全天發車時刻。橘色為尖峰時段班次（班距 ≤ 4 分鐘）。</p>
+        <div class="tt-controls">
+          <label>路線</label>
+          <select class="tt-select" id="ttLineSelect"></select>
+          <label>顯示模式</label>
+          <select class="tt-select" id="ttModeSelect">
+            <option value="grid">時刻格</option>
+            <option value="table">明細表</option>
+          </select>
+        </div>
+        <div class="tt-summary" id="ttSummary"></div>
+        <div class="tt-scroll" id="ttContent"></div>
+      </div>
+    </div>
+
     <!-- Timeline -->
     <div class="timeline-bar">
       <span class="timeline-label">時段</span>
@@ -215,6 +277,7 @@
 
 <script>
 let DATA = null;
+let TIMETABLE = {};
 let playInterval = null;
 let currentHour = 8;
 
@@ -224,6 +287,10 @@ async function loadData() {
     const res = await fetch('./data.json');
     if (!res.ok) throw new Error('data.json not found');
     DATA = await res.json();
+    try {
+      const tr = await fetch('../data/output/timetable_summary.json');
+      TIMETABLE = tr.ok ? await tr.json() : {};
+    } catch(_) { TIMETABLE = {}; }
     initDashboard();
   } catch(e) {
     showEmpty('尚無資料', '請先執行 python pipeline/run_pipeline.py 產生 data.json');
@@ -252,6 +319,7 @@ function initDashboard() {
   drawHeatmap();
   drawFlowChart();
   drawHeadwayChart();
+  initTimetable();
   updateSidebar(currentHour);
 }
 
@@ -261,7 +329,6 @@ function drawHeatmap() {
   const { stations, hours, values } = DATA.heatmap_matrix;
   if (!stations.length) { showEmpty('無轉乘站資料','路網中未找到有效轉乘站'); return; }
 
-  // 只顯示營運時段 hour >= 6
   const opIdx = hours.map((h, i) => h >= 6 ? i : -1).filter(i => i >= 0);
   const opHours = opIdx.map(i => hours[i]);
   const opValues = values.map(row => opIdx.map(i => row[i]));
@@ -278,22 +345,15 @@ function drawHeatmap() {
     font: { color: '#e2e4f0', family: 'Segoe UI, Noto Sans TC, sans-serif', size: 12 },
     margin: { t: 10, r: 20, b: 40, l: 110 },
     xaxis: { title: '時段（小時）', tickmode: 'array', tickvals: opHours,
-             ticktext: opHours.map(h => h + ':00'), tickfont: { size: 11 },
-             gridcolor: '#2e3249' },
+             ticktext: opHours.map(h => h + ':00'), tickfont: { size: 11 }, gridcolor: '#2e3249' },
     yaxis: { tickfont: { size: 11 }, autorange: 'reversed', gridcolor: '#2e3249' },
     shapes,
     hoverlabel: { bgcolor: '#1a1d27', bordercolor: '#4f9cf9', font: { color: '#e2e4f0' } }
   };
 
   const trace = {
-    type: 'heatmap',
-    z: opValues,
-    x: opHours,
-    y: stations,
-    colorscale: [
-      [0, '#1a1d27'], [0.2, '#1e3a5f'], [0.5, '#1d4ed8'],
-      [0.75, '#f97316'], [1.0, '#ef4444']
-    ],
+    type: 'heatmap', z: opValues, x: opHours, y: stations,
+    colorscale: [[0,'#1a1d27'],[0.2,'#1e3a5f'],[0.5,'#1d4ed8'],[0.75,'#f97316'],[1.0,'#ef4444']],
     zmin: 0, zmax: 1.0,
     hovertemplate: '%{y}<br>%{x}:00<br>流量比例：%{z:.1%}<extra></extra>',
     showscale: true,
@@ -320,36 +380,25 @@ function updateHeatmapLine(hour) {
   });
 }
 
-// ── 各站趨勢折線圖（僅營運時段 >= 6）──────────────
+// ── 各站趨勢折線圖 ────────────────────────────────
 function drawFlowChart() {
   if (!DATA || !DATA.transfer_flow || !DATA.transfer_flow.length) {
-    showEmpty('無流量資料', '請確認 step3 有輸出轉乘站資料');
-    return;
+    showEmpty('無流量資料', '請確認 step3 有輸出轉乘站資料'); return;
   }
-
-  // 過濾掉 0~5 點
   const opFlow = DATA.transfer_flow.filter(d => d.hour >= 6);
   const stations = [...new Set(opFlow.map(d => d.transfer_station))];
   const hours = [...new Set(opFlow.map(d => d.hour))].sort((a,b)=>a-b);
-
   const palette = ['#4f9cf9','#f97316','#22c55e','#eab308','#ef4444',
                    '#a855f7','#06b6d4','#ec4899','#84cc16','#f59e0b'];
-
-  const traces = stations.map((st, i) => {
-    const stData = hours.map(h => {
-      const row = opFlow.find(d => d.transfer_station === st && d.hour === h);
-      return row ? row.transfer_ratio : null;
-    });
-    return {
-      type: 'scatter', mode: 'lines+markers',
-      name: st, x: hours.map(h => h + ':00'), y: stData,
-      line: { color: palette[i % palette.length], width: 2 },
-      marker: { size: 5 },
-      hovertemplate: st + ' %{x}<br>流量比例 %{y:.1%}<extra></extra>',
-      connectgaps: true
-    };
-  });
-
+  const traces = stations.map((st, i) => ({
+    type: 'scatter', mode: 'lines+markers', name: st,
+    x: hours.map(h => h + ':00'),
+    y: hours.map(h => { const r = opFlow.find(d => d.transfer_station===st && d.hour===h); return r ? r.transfer_ratio : null; }),
+    line: { color: palette[i % palette.length], width: 2 },
+    marker: { size: 5 },
+    hovertemplate: st + ' %{x}<br>流量比例 %{y:.1%}<extra></extra>',
+    connectgaps: true
+  }));
   const layout = {
     paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
     font: { color: '#e2e4f0', size: 12 },
@@ -359,38 +408,27 @@ function drawFlowChart() {
     legend: { bgcolor: 'transparent', font: { size: 11 } },
     hovermode: 'closest'
   };
-
   Plotly.newPlot('flowChart', traces, layout, { responsive: true, displayModeBar: false });
 }
 
-// ── 班距建議圖（僅營運時段 >= 6）────────────────
+// ── 班距建議圖 ────────────────────────────────────
 function drawHeadwayChart() {
   if (!DATA || !DATA.headway_plan || !DATA.headway_plan.length) {
-    showEmpty('無班距資料','請確認 step4 GA 最佳化有輸出結果');
-    return;
+    showEmpty('無班距資料','請確認 step4 GA 最佳化有輸出結果'); return;
   }
-
-  // 過濾掉 0~5 點（理論上 GA 只輸出 ANALYSIS_HOURS，但保險起見過濾）
   const opPlan = DATA.headway_plan.filter(d => d.hour >= 6);
   const lines = [...new Set(opPlan.map(d => d.line))];
   const hours = [...new Set(opPlan.map(d => d.hour))].sort((a,b)=>a-b);
   const palette = ['#4f9cf9','#f97316','#22c55e','#eab308','#a855f7'];
-
-  const traces = lines.map((line, i) => {
-    const y = hours.map(h => {
-      const row = opPlan.find(d => d.line === line && d.hour === h);
-      return row ? row.suggested_headway_min : null;
-    });
-    return {
-      type: 'scatter', mode: 'lines+markers', name: line,
-      x: hours.map(h => h + ':00'), y,
-      line: { color: palette[i % palette.length], width: 2 },
-      marker: { size: 5 },
-      hovertemplate: line + ' %{x}<br>建議班距 %{y:.1f} 分鐘<extra></extra>',
-      connectgaps: true
-    };
-  });
-
+  const traces = lines.map((line, i) => ({
+    type: 'scatter', mode: 'lines+markers', name: line,
+    x: hours.map(h => h + ':00'),
+    y: hours.map(h => { const r = opPlan.find(d => d.line===line && d.hour===h); return r ? r.suggested_headway_min : null; }),
+    line: { color: palette[i % palette.length], width: 2 },
+    marker: { size: 5 },
+    hovertemplate: line + ' %{x}<br>建議班距 %{y:.1f} 分鐘<extra></extra>',
+    connectgaps: true
+  }));
   const layout = {
     paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
     font: { color: '#e2e4f0', size: 12 },
@@ -399,38 +437,111 @@ function drawHeadwayChart() {
     yaxis: { title: '班距（分鐘）', gridcolor: '#2e3249', tickfont: { size: 11 } },
     legend: { bgcolor: 'transparent', font: { size: 11 } },
   };
-
   Plotly.newPlot('headwayChart', traces, layout, { responsive: true, displayModeBar: false });
+}
+
+// ── 時刻表 ────────────────────────────────────────
+function initTimetable() {
+  const sel = document.getElementById('ttLineSelect');
+  sel.innerHTML = '';
+  const lines = Object.keys(TIMETABLE);
+  if (!lines.length) {
+    document.getElementById('ttContent').innerHTML =
+      '<div class="empty-state"><div class="icon">🚇</div><strong>尚無時刻表</strong><p>請先執行 run_pipeline.py 完成 Step 5T</p></div>';
+    return;
+  }
+  lines.forEach(l => {
+    const opt = document.createElement('option');
+    opt.value = l; opt.textContent = l;
+    sel.appendChild(opt);
+  });
+  sel.addEventListener('change', renderTimetable);
+  document.getElementById('ttModeSelect').addEventListener('change', renderTimetable);
+  renderTimetable();
+}
+
+function renderTimetable() {
+  const line = document.getElementById('ttLineSelect').value;
+  const mode = document.getElementById('ttModeSelect').value;
+  const data = TIMETABLE[line];
+  if (!data) return;
+
+  const trains = (data.trains || []).sort();
+  const total = data.total_trains || trains.length;
+  const hwByHour = data.headway_by_hour || {};
+  const offByHour = data.offset_by_hour || {};
+
+  // KPI summary
+  const hwVals = Object.values(hwByHour).map(Number);
+  const minHw = hwVals.length ? Math.min(...hwVals).toFixed(1) : '—';
+  const maxHw = hwVals.length ? Math.max(...hwVals).toFixed(1) : '—';
+  const offCount = Object.values(offByHour).filter(v => v > 0).length;
+
+  document.getElementById('ttSummary').innerHTML = `
+    <div class="tt-kpi"><div class="tt-kpi-label">總班次</div><div class="tt-kpi-value">${total}</div></div>
+    <div class="tt-kpi"><div class="tt-kpi-label">最短班距</div><div class="tt-kpi-value">${minHw} 分</div></div>
+    <div class="tt-kpi"><div class="tt-kpi-label">最長班距</div><div class="tt-kpi-value">${maxHw} 分</div></div>
+    <div class="tt-kpi"><div class="tt-kpi-label">換乘偏移時段</div><div class="tt-kpi-value">${offCount}</div></div>
+  `;
+
+  const content = document.getElementById('ttContent');
+
+  if (mode === 'grid') {
+    // 按小時分組顯示時刻格
+    const byHour = {};
+    trains.forEach(t => {
+      const h = t.split(':')[0];
+      if (!byHour[h]) byHour[h] = [];
+      byHour[h].push(t);
+    });
+    const hw = parseFloat(hwByHour[Object.keys(hwByHour)[0]] || 99);
+    let html = '<table class="tt-table"><thead><tr><th style="width:64px">時段</th><th>發車時刻</th><th style="width:70px">班距(分)</th><th style="width:70px">偏移(分)</th></tr></thead><tbody>';
+    Object.keys(byHour).sort().forEach(h => {
+      const rowHw = parseFloat(hwByHour[h] || 0).toFixed(1);
+      const rowOff = parseFloat(offByHour[h] || 0).toFixed(2);
+      const isPeak = parseFloat(rowHw) <= 4;
+      const chipsHtml = byHour[h].map(t => `<span class="tt-chip${isPeak?' peak':''}">${t}</span>`).join('');
+      html += `<tr class="${isPeak?'peak-row':''}"><td>${h}:xx</td><td><div class="tt-hour-group">${chipsHtml}</div></td><td>${rowHw}</td><td>${rowOff}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    content.innerHTML = html;
+  } else {
+    // 明細表模式
+    let html = '<table class="tt-table"><thead><tr><th>#</th><th>發車時刻</th><th>班距(分)</th><th>換乘偏移(分)</th></tr></thead><tbody>';
+    trains.forEach((t, i) => {
+      const h = t.split(':')[0];
+      const rowHw = parseFloat(hwByHour[h] || 0).toFixed(1);
+      const rowOff = parseFloat(offByHour[h] || 0).toFixed(2);
+      const isPeak = parseFloat(rowHw) <= 4;
+      html += `<tr class="${isPeak?'peak-row':''}">`;
+      html += `<td style="color:var(--muted)">${i+1}</td><td>${t}</td><td>${rowHw}</td><td>${rowOff}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    content.innerHTML = html;
+  }
 }
 
 // ── Sidebar 更新 ──────────────────────────────────
 function updateSidebar(hour) {
   document.getElementById('kpiHour').textContent = String(hour).padStart(2,'0') + ':00';
   if (!DATA || !DATA.transfer_flow) return;
-
   const hourData = DATA.transfer_flow
     .filter(d => d.hour === hour)
     .sort((a,b) => b.transfer_ratio - a.transfer_ratio);
-
-  if (hourData.length === 0) {
+  if (!hourData.length) {
     document.getElementById('kpiPeakStation').textContent = '—';
     document.getElementById('kpiPeakRatio').textContent = '無資料';
     document.getElementById('kpiHighCount').textContent = '0';
     document.getElementById('pressureBarList').innerHTML = '';
     return;
   }
-
   const peak = hourData[0];
   document.getElementById('kpiPeakStation').textContent = peak.transfer_station;
-  document.getElementById('kpiPeakRatio').textContent =
-    `流量比例 ${(peak.transfer_ratio * 100).toFixed(1)}%`;
-
+  document.getElementById('kpiPeakRatio').textContent = `流量比例 ${(peak.transfer_ratio * 100).toFixed(1)}%`;
   const highCount = hourData.filter(d => d.transfer_ratio > 0.15).length;
   document.getElementById('kpiHighCount').textContent = highCount;
-
   const maxRatio = Math.max(...hourData.map(d => d.transfer_ratio), 0.01);
-  const listEl = document.getElementById('pressureBarList');
-  listEl.innerHTML = hourData.slice(0, 8).map(d => {
+  document.getElementById('pressureBarList').innerHTML = hourData.slice(0, 8).map(d => {
     const pct = (d.transfer_ratio / maxRatio * 100).toFixed(0);
     const color = d.transfer_ratio > 0.75 ? 'var(--danger)'
                 : d.transfer_ratio > 0.50 ? 'var(--accent2)'
@@ -459,9 +570,7 @@ slider.addEventListener('input', () => {
 
 playBtn.addEventListener('click', () => {
   if (playInterval) {
-    clearInterval(playInterval);
-    playInterval = null;
-    playBtn.textContent = '▶ 播放';
+    clearInterval(playInterval); playInterval = null; playBtn.textContent = '▶ 播放';
   } else {
     playBtn.textContent = '⏸ 暫停';
     const speed = parseInt(speedSelect.value);
