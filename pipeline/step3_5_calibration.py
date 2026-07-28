@@ -4,7 +4,7 @@ Step 3.5 — 用各站進出人次觀測值校正 estimated_trips
 
 原理：
   OD 推算出的轉乘流量是模型估計值，沒有觀測依據。
-  各站進出人次（公開資料）告訴我們每站每小時實際有多少人進出，
+  各站進出人次（公開資料）告訴我們每站每月/每年實際有多少人進出，
   雖然這個數字包含非轉乘旅客，但可以做兩件事：
 
   1. 量級校正（scale correction）
@@ -22,13 +22,17 @@ Step 3.5 — 用各站進出人次觀測值校正 estimated_trips
   - 校正後重新計算 transfer_ratio percentile rank（只對營運時段 hour >= 6）
   - 輸出欄位新增 scale_factor, pre_calibration_trips 方便 debug
 
-進出人次 CSV 預期格式（自動偵測欄位）：
-  有「日期」欄位：每日明細版
-    → 欄位：日期, 站名, 進站人次, 出站人次
-  有「年」或「年份」欄位：月份彙總版
-    → 欄位：年份, 月份, 站名, 進站人次, 出站人次
+支援的進出人次 CSV 格式：
+  1. 有時段欄位
+     欄位：站名, 時段, 進站人次, 出站人次
+  2. 無時段（月份/年份彙總版）
+     欄位：統計期, 捷運站別, 進站人次, 出站人次[, 增減率欄位（自動忽略）]
+     統計期為「85年」「113年1月」等民國年字串
+     → 自動取最近年份資料，全日平均分配給各小時
+  3. 一般日期版
+     欄位：日期, 站名, 進站人次, 出站人次
 
-  欄位名稱的空格/底線/繁簡差異會自動處理。
+  站名後綴（BR/R/G/O/BL/V/Y）和臺/台差異會自動處理。
 """
 
 import sys
@@ -43,39 +47,43 @@ from pipeline.config import ANALYSIS_HOURS
 
 _OPERATING_HOUR_MIN = 6
 
-# 進出人次 CSV 的預設存放目錄
 _DEFAULT_RIDERSHIP_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     'data', 'ridership_raw'
 )
 
+# 北捷路線代碼後綴（站名可能帶著路線標記）
+_LINE_SUFFIX_RE = re.compile(r'(BR|BL|[RGOVY])$')
+
 # ---------------------------------------------------------------------------
-# 欄位偵測工具
+# 欄位偵測
 # ---------------------------------------------------------------------------
 
 def _normalize_col(name: str) -> str:
-    """統一欄位名稱：去空白、底線、簡轉繁對照"""
     name = name.strip().replace('_', '').replace(' ', '')
-    mapping = {
-        '站名': '站名', '车站': '站名', '站別': '站名',
-        '進站': '進站人次', '进站': '進站人次', '進站人次': '進站人次',
-        '出站': '出站人次', '出站': '出站人次', '出站人次': '出站人次',
-        '日期': '日期', '年份': '年份', '年': '年份',
-        '月份': '月份', '月': '月份',
-        '時段': '時段', '小時': '時段', '時': '時段', 'hour': '時段',
-    }
-    for k, v in mapping.items():
-        if k in name:
-            return v
+    table = [
+        # 站名相關
+        ('捷運站別', '站名'), ('站名', '站名'), ('車站', '站名'), ('站別', '站名'),
+        # 進站
+        ('進站人次', '進站人次'), ('進站', '進站人次'), ('进站', '進站人次'),
+        # 出站
+        ('出站人次', '出站人次'), ('出站', '出站人次'), ('出站', '出站人次'),
+        # 時段
+        ('時段', '時段'), ('小時', '時段'), ('時', '時段'), ('hour', '時段'),
+        # 日期
+        ('日期', '日期'),
+        # 統計期（民國年）— 記錄為特殊 key，load_ridership 會處理
+        ('統計期', '統計期'),
+        # 年月
+        ('年份', '年份'), ('年', '年份'), ('月份', '月份'), ('月', '月份'),
+    ]
+    for keyword, semantic in table:
+        if keyword in name:
+            return semantic
     return name
 
 
 def _detect_columns(df: pd.DataFrame) -> dict:
-    """
-    回傳欄位對照 dict，key 為語意名稱，value 為 df 的實際欄位名稱。
-    必要欄位：站名, 進站人次, 出站人次
-    選填欄位：日期 or (年份 + 月份), 時段
-    """
     mapping = {}
     for col in df.columns:
         norm = _normalize_col(col)
@@ -85,23 +93,38 @@ def _detect_columns(df: pd.DataFrame) -> dict:
     missing = [r for r in required if r not in mapping]
     if missing:
         raise ValueError(
-            f'進出人次 CSV 缺少必要欄位 {missing}。\n'
-            f'實際欄位：{list(df.columns)}'
+            f'進出人次 CSV 缺少必要欄位 {missing}。\n實際欄位：{list(df.columns)}'
         )
     return mapping
+
+
+# ---------------------------------------------------------------------------
+# 站名正規化（去後綴、臺/台統一）
+# ---------------------------------------------------------------------------
+
+def _normalize_station_name(name: str) -> str:
+    """去掉路線代碼後綴，統一臺/台，去空白"""
+    name = str(name).strip()
+    name = name.replace('臺', '台')          # 繁簡/異體
+    name = _LINE_SUFFIX_RE.sub('', name)     # 去 BR/BL/R/G/O/V/Y 後綴
+    name = name.rstrip()                     # 去掉可能遺留的空白
+    return name
 
 
 # ---------------------------------------------------------------------------
 # 讀取進出人次資料
 # ---------------------------------------------------------------------------
 
+def _parse_roc_year(s: str):
+    """從 '113年1月' 或 '85年' 解析民國年數字，解析失敗回傳 None"""
+    m = re.match(r'^(\d+)年', str(s).strip())
+    return int(m.group(1)) if m else None
+
+
 def load_ridership(ridership_dir: str = _DEFAULT_RIDERSHIP_DIR) -> pd.DataFrame:
     """
-    讀取 ridership_dir 下所有 CSV，合併成 (station_name, hour, total_passengers) 格式。
-    hour 欄位：
-      - 若原始資料有時段欄位 → 直接使用
-      - 若只有日期/月份（無時段）→ 無法細分時段，total_passengers 為全日總和，
-        hour 設 None，後續校正會用全日平均分配
+    讀取 ridership_dir 下所有 CSV，合併成 (station_name, hour, total_passengers)。
+    station_name 已正規化（去後綴、台/臺統一）。
     """
     csv_files = glob.glob(os.path.join(ridership_dir, '*.csv'))
     if not csv_files:
@@ -113,36 +136,16 @@ def load_ridership(ridership_dir: str = _DEFAULT_RIDERSHIP_DIR) -> pd.DataFrame:
         try:
             df = pd.read_csv(path, encoding='utf-8-sig')
             df.columns = df.columns.str.strip()
-            col = _detect_columns(df)
 
-            station_col = col['站名']
-            entry_col   = col['進站人次']
-            exit_col    = col['出站人次']
-            hour_col    = col.get('時段', None)
+            # --- 偵測是否為「統計期 + 捷運站別」格式（北捷公開資料格式）---
+            has_stat_period = any('統計期' in c for c in df.columns)
+            has_metro_station = any('捷運站別' in c for c in df.columns)
 
-            df[entry_col] = pd.to_numeric(df[entry_col], errors='coerce').fillna(0)
-            df[exit_col]  = pd.to_numeric(df[exit_col],  errors='coerce').fillna(0)
-            df['total_passengers'] = df[entry_col] + df[exit_col]
-
-            if hour_col:
-                df['hour'] = pd.to_numeric(df[hour_col], errors='coerce')
-                result = df[[station_col, 'hour', 'total_passengers']].rename(
-                    columns={station_col: 'station_name'}
-                )
+            if has_stat_period and has_metro_station:
+                result = _load_roc_format(df)
             else:
-                # 無時段欄位：以全日平均分配給各小時
-                daily = df.groupby(station_col)['total_passengers'].sum().reset_index()
-                daily.columns = ['station_name', 'total_passengers']
-                daily['total_passengers'] = daily['total_passengers'] / 24
-                rows = []
-                for _, row in daily.iterrows():
-                    for h in range(24):
-                        rows.append({
-                            'station_name': row['station_name'],
-                            'hour': h,
-                            'total_passengers': row['total_passengers']
-                        })
-                result = pd.DataFrame(rows)
+                col = _detect_columns(df)
+                result = _load_generic_format(df, col)
 
             dfs.append(result)
         except Exception as e:
@@ -154,12 +157,78 @@ def load_ridership(ridership_dir: str = _DEFAULT_RIDERSHIP_DIR) -> pd.DataFrame:
     merged = pd.concat(dfs, ignore_index=True)
     ridership = (
         merged.groupby(['station_name', 'hour'])['total_passengers']
-        .mean()  # 多檔案取平均（典型日）
+        .mean()
         .reset_index()
     )
     print(f'  [Step3.5] 進出人次資料：{len(ridership)} 筆，'
           f'{ridership["station_name"].nunique()} 站')
     return ridership
+
+
+def _load_roc_format(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    處理北捷公開資料格式：
+      統計期（民國年）, 捷運站別, 進站人次, 出站人次[, 增減率欄位...]
+    取最近年份資料，全日平均分配給各小時。
+    """
+    stat_col    = next(c for c in df.columns if '統計期' in c)
+    station_col = next(c for c in df.columns if '捷運站別' in c)
+    entry_col   = next(c for c in df.columns if '進站人次' in c)
+    exit_col    = next(c for c in df.columns if '出站人次' in c)
+
+    df = df[[stat_col, station_col, entry_col, exit_col]].copy()
+    df['_roc_year'] = df[stat_col].apply(_parse_roc_year)
+    df = df.dropna(subset=['_roc_year'])
+
+    # 取最近年份（最大民國年）
+    latest_year = df['_roc_year'].max()
+    df = df[df['_roc_year'] == latest_year].copy()
+    print(f'  [Step3.5] 進出人次資料使用民國 {int(latest_year)} 年資料')
+
+    df[entry_col] = pd.to_numeric(df[entry_col], errors='coerce').fillna(0)
+    df[exit_col]  = pd.to_numeric(df[exit_col],  errors='coerce').fillna(0)
+    df['total_passengers'] = df[entry_col] + df[exit_col]
+
+    # 正規化站名
+    df['station_name'] = df[station_col].apply(_normalize_station_name)
+
+    # 全日加總後平均分配給 24 小時
+    daily = df.groupby('station_name')['total_passengers'].sum().reset_index()
+    rows = []
+    for _, row in daily.iterrows():
+        hourly = row['total_passengers'] / 24
+        for h in range(24):
+            rows.append({'station_name': row['station_name'],
+                         'hour': h,
+                         'total_passengers': hourly})
+    return pd.DataFrame(rows)
+
+
+def _load_generic_format(df: pd.DataFrame, col: dict) -> pd.DataFrame:
+    """處理有時段欄位或日期欄位的一般格式"""
+    station_col = col['站名']
+    entry_col   = col['進站人次']
+    exit_col    = col['出站人次']
+    hour_col    = col.get('時段', None)
+
+    df[entry_col] = pd.to_numeric(df[entry_col], errors='coerce').fillna(0)
+    df[exit_col]  = pd.to_numeric(df[exit_col],  errors='coerce').fillna(0)
+    df['total_passengers'] = df[entry_col] + df[exit_col]
+    df['station_name'] = df[station_col].apply(_normalize_station_name)
+
+    if hour_col:
+        df['hour'] = pd.to_numeric(df[hour_col], errors='coerce')
+        return df[['station_name', 'hour', 'total_passengers']].copy()
+    else:
+        daily = df.groupby('station_name')['total_passengers'].sum().reset_index()
+        rows = []
+        for _, row in daily.iterrows():
+            hourly = row['total_passengers'] / 24
+            for h in range(24):
+                rows.append({'station_name': row['station_name'],
+                             'hour': h,
+                             'total_passengers': hourly})
+        return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -168,28 +237,34 @@ def load_ridership(ridership_dir: str = _DEFAULT_RIDERSHIP_DIR) -> pd.DataFrame:
 
 def _build_name_map(flow_stations: list, ridership_stations: list) -> dict:
     """
-    嘗試將 flow 裡的站名對應到 ridership 資料的站名。
+    flow 站名 → ridership 站名對照。
+    ridership_stations 已經過 _normalize_station_name 正規化。
+    flow_stations 也先做正規化再比對。
     策略（依優先順序）：
-      1. 完全相符
-      2. 去除「站」字後相符
-      3. 任一方包含另一方
-    回傳 {flow_station_name: ridership_station_name}
+      1. 正規化後完全相符
+      2. 去「站」字後相符
+      3. 包含關係
     """
-    ridership_set = {s: s for s in ridership_stations}
-    ridership_stripped = {re.sub(r'站$', '', s): s for s in ridership_stations}
+    # ridership 正規化 lookup
+    rs_norm_map = {_normalize_station_name(s): s for s in ridership_stations}
+    rs_nostop   = {re.sub(r'站$', '', _normalize_station_name(s)): s
+                   for s in ridership_stations}
 
     name_map = {}
     for fs in flow_stations:
-        if fs in ridership_set:
-            name_map[fs] = fs
+        fs_norm = _normalize_station_name(fs)
+        fs_nostop = re.sub(r'站$', '', fs_norm)
+
+        if fs_norm in rs_norm_map:
+            name_map[fs] = rs_norm_map[fs_norm]
             continue
-        fs_stripped = re.sub(r'站$', '', fs)
-        if fs_stripped in ridership_stripped:
-            name_map[fs] = ridership_stripped[fs_stripped]
+        if fs_nostop in rs_nostop:
+            name_map[fs] = rs_nostop[fs_nostop]
             continue
-        # 包含關係
-        candidates = [rs for rs in ridership_stations
-                      if fs in rs or rs in fs or fs_stripped in rs]
+        # 包含關係（正規化後）
+        candidates = [s for s in ridership_stations
+                      if fs_norm in _normalize_station_name(s)
+                      or _normalize_station_name(s) in fs_norm]
         if candidates:
             name_map[fs] = candidates[0]
 
@@ -204,17 +279,6 @@ def calibrate(
     flow_df: pd.DataFrame,
     ridership_dir: str = _DEFAULT_RIDERSHIP_DIR,
 ) -> pd.DataFrame:
-    """
-    輸入：step3 輸出的 flow_df
-      欄位：transfer_station, hour, estimated_trips, transfer_ratio, pressure_level
-
-    輸出：校正後的 flow_df，新增欄位：
-      pre_calibration_trips  — 校正前的 estimated_trips
-      scale_factor           — observed_total / estimated_total（全日站級）
-      estimated_trips        — 校正後（縮放 + cap）
-      transfer_ratio         — 重新計算的 percentile rank
-      pressure_level         — 重新計算的四分位
-    """
     if flow_df.empty:
         return flow_df
 
@@ -222,69 +286,59 @@ def calibrate(
 
     if ridership.empty:
         print('  [Step3.5] 無進出人次資料，直接回傳原始 flow_df')
+        flow_df = flow_df.copy()
         flow_df['pre_calibration_trips'] = flow_df['estimated_trips']
         flow_df['scale_factor'] = 1.0
         return flow_df
 
-    # 站名對齊
     flow_stations = flow_df['transfer_station'].unique().tolist()
     ridership_stations = ridership['station_name'].unique().tolist()
     name_map = _build_name_map(flow_stations, ridership_stations)
 
     unmatched = [s for s in flow_stations if s not in name_map]
     if unmatched:
-        print(f'  [Step3.5] 找不到進出人次對應的轉乘站（{len(unmatched)} 個）：'
-              f'{unmatched[:5]}... → scale_factor=1.0')
+        print(f'  [Step3.5] 未對齊站（{len(unmatched)} 個）：{unmatched[:8]} → scale_factor=1.0')
 
-    # 計算每站全日 observed_total 和 estimated_total
     station_estimated = (
         flow_df.groupby('transfer_station')['estimated_trips'].sum()
-        .reset_index()
-        .rename(columns={'estimated_trips': 'estimated_total'})
+        .reset_index().rename(columns={'estimated_trips': 'estimated_total'})
     )
     station_observed = (
         ridership.groupby('station_name')['total_passengers'].sum()
-        .reset_index()
-        .rename(columns={'total_passengers': 'observed_total'})
+        .reset_index().rename(columns={'total_passengers': 'observed_total'})
     )
 
-    # 合併，算 scale_factor
     station_estimated['ridership_name'] = station_estimated['transfer_station'].map(name_map)
     station_estimated = station_estimated.merge(
-        station_observed,
-        left_on='ridership_name', right_on='station_name',
-        how='left'
+        station_observed, left_on='ridership_name', right_on='station_name', how='left'
     )
     station_estimated['scale_factor'] = (
         station_estimated['observed_total'] /
         station_estimated['estimated_total'].replace(0, np.nan)
-    ).fillna(1.0).clip(lower=0.01, upper=100.0)  # 避免極端縮放
+    ).fillna(1.0).clip(lower=0.01, upper=100.0)
 
     scale_map = dict(zip(
         station_estimated['transfer_station'],
         station_estimated['scale_factor']
     ))
 
-    # 備份原始值
     result = flow_df.copy()
     result['pre_calibration_trips'] = result['estimated_trips']
     result['scale_factor'] = result['transfer_station'].map(scale_map).fillna(1.0)
-
-    # 縮放
     result['estimated_trips'] = (result['estimated_trips'] * result['scale_factor']).round(2)
 
-    # 上界截斷：corrected_trips <= observed total 該站該時段
+    # 上界截斷
     ridership_hour = ridership.copy()
-    ridership_hour['transfer_station'] = ridership_hour['station_name'].map(
-        {v: k for k, v in name_map.items()}
-    )
+    reverse_map = {}
+    for fs, rs in name_map.items():
+        reverse_map.setdefault(rs, fs)  # 取第一個對應
+    ridership_hour['transfer_station'] = ridership_hour['station_name'].map(reverse_map)
     ridership_hour = ridership_hour.dropna(subset=['transfer_station'])
     ridership_hour = ridership_hour.rename(columns={'total_passengers': 'obs_hour_total'})
 
     result = result.merge(
         ridership_hour[['transfer_station', 'hour', 'obs_hour_total']],
-        on=['transfer_station', 'hour'],
-        how='left'
+        on=['transfer_station', 'hour'], how='left'
     )
     has_obs = result['obs_hour_total'].notna()
     result.loc[has_obs, 'estimated_trips'] = result.loc[has_obs].apply(
@@ -292,13 +346,13 @@ def calibrate(
     )
     result = result.drop(columns=['obs_hour_total'])
 
-    # 重新計算 transfer_ratio（只對營運時段）
+    # 重算 transfer_ratio
     result['transfer_ratio'] = 0.0
     is_operating = result['hour'] >= _OPERATING_HOUR_MIN
     if is_operating.any():
-        operating_trips = result.loc[is_operating, 'estimated_trips']
         result.loc[is_operating, 'transfer_ratio'] = (
-            operating_trips.rank(pct=True, method='average').round(4)
+            result.loc[is_operating, 'estimated_trips']
+            .rank(pct=True, method='average').round(4)
         )
 
     result['pressure_level'] = pd.cut(
@@ -308,8 +362,8 @@ def calibrate(
         include_lowest=True
     )
 
-    matched_count = sum(1 for s in flow_stations if s in name_map)
-    print(f'  [Step3.5] 站名對齊：{matched_count}/{len(flow_stations)} 站完成校正')
+    matched = sum(1 for s in flow_stations if s in name_map)
+    print(f'  [Step3.5] 站名對齊：{matched}/{len(flow_stations)} 站')
     print(f'  [Step3.5] scale_factor 範圍：'
           f'{result["scale_factor"].min():.3f} ~ {result["scale_factor"].max():.3f}')
 
@@ -317,9 +371,9 @@ def calibrate(
 
 
 if __name__ == '__main__':
-    # 快速測試：用假資料跑一遍
-    import tempfile, json
+    import tempfile
 
+    # 模擬北捷公開資料格式（統計期 + 捷運站別）
     sample_flow = pd.DataFrame([
         {'transfer_station': '台北車站', 'hour': 8,  'estimated_trips': 500.0,
          'transfer_ratio': 0.9, 'pressure_level': '極高'},
@@ -327,20 +381,21 @@ if __name__ == '__main__':
          'transfer_ratio': 0.7, 'pressure_level': '高'},
         {'transfer_station': '七張',    'hour': 8,  'estimated_trips': 80.0,
          'transfer_ratio': 0.4, 'pressure_level': '中'},
-        {'transfer_station': '古亭',    'hour': 9,  'estimated_trips': 120.0,
+        {'transfer_station': '南京復興', 'hour': 9,  'estimated_trips': 120.0,
          'transfer_ratio': 0.5, 'pressure_level': '中'},
     ])
 
-    # 用 tempdir 模擬有一個進出人次 CSV
     with tempfile.TemporaryDirectory() as tmpdir:
-        ridership_csv = os.path.join(tmpdir, 'ridership_sample.csv')
-        ridership_data = pd.DataFrame([
-            {'站名': '台北車站', '時段': 8,  '進站人次': 8000, '出站人次': 7000},
-            {'站名': '台北車站', '時段': 12, '進站人次': 5000, '出站人次': 4500},
-            {'站名': '七張',    '時段': 8,  '進站人次': 600,  '出站人次': 550},
-            {'站名': '古亭',    '時段': 9,  '進站人次': 900,  '出站人次': 850},
-        ])
-        ridership_data.to_csv(ridership_csv, index=False, encoding='utf-8-sig')
+        ridership_csv = os.path.join(tmpdir, 'ridership.csv')
+        # 模擬北捷公開格式（含 BR 後綴、民國年）
+        pd.DataFrame([
+            {'統計期': '113年', '捷運站別': '臺北車站',   '進站人次': 192000, '出站人次': 168000,
+             '進站人次增減率[%]': 0, '出站人次增減率[%]': 0},
+            {'統計期': '113年', '捷運站別': '七張',       '進站人次': 14400,  '出站人次': 13200,
+             '進站人次增減率[%]': 0, '出站人次增減率[%]': 0},
+            {'統計期': '113年', '捷運站別': '南京復興BR', '進站人次': 28800,  '出站人次': 24000,
+             '進站人次增減率[%]': 0, '出站人次增減率[%]': 0},
+        ]).to_csv(ridership_csv, index=False, encoding='utf-8-sig')
 
         result = calibrate(sample_flow, ridership_dir=tmpdir)
         print('\n校正結果：')
