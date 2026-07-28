@@ -19,7 +19,7 @@ Step 3.5 — 用各站進出人次觀測值校正 estimated_trips
 
 注意：
   - 若某站在進出人次資料中找不到對應名稱，scale_factor 設 1.0（不校正）
-  - 校正後重新計算 transfer_ratio percentile rank（只對營運時段 hour >= 6）
+  - 校正後重新計算 transfer_ratio（絕對正規化：trips / max(trips)，與 step3 一致）
   - 輸出欄位新增 scale_factor, pre_calibration_trips 方便 debug
 
 支援的進出人次 CSV 格式：
@@ -346,14 +346,17 @@ def calibrate(
     )
     result = result.drop(columns=['obs_hour_total'])
 
-    # 重算 transfer_ratio
+    # 重算 transfer_ratio — 絕對正規化（trips / max(trips)），與 step3 一致
+    # percentile rank 已移除：rank 保證均勻分佈，校正後時段差異會被抹平
     result['transfer_ratio'] = 0.0
     is_operating = result['hour'] >= _OPERATING_HOUR_MIN
     if is_operating.any():
-        result.loc[is_operating, 'transfer_ratio'] = (
-            result.loc[is_operating, 'estimated_trips']
-            .rank(pct=True, method='average').round(4)
-        )
+        operating_trips = result.loc[is_operating, 'estimated_trips']
+        max_trips = operating_trips.max()
+        if max_trips > 0:
+            result.loc[is_operating, 'transfer_ratio'] = (
+                (operating_trips / max_trips).round(4)
+            )
 
     result['pressure_level'] = pd.cut(
         result['transfer_ratio'],
