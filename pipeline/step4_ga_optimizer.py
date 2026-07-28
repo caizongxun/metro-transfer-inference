@@ -25,6 +25,11 @@ from pipeline.config import (
     HEADWAY_MIN, HEADWAY_MAX, ANALYSIS_HOURS, PRESSURE_THRESHOLD
 )
 
+# 相鄰時段班距變化的平滑懲罰係數
+# 每分鐘的跨時段班距差異都會乘以此係數加入 fitness
+# 調高此值可讓班距曲線更平滑，調低可允許更多彈性
+SMOOTH_WEIGHT = 0.5
+
 # 北捷主要路線
 LINES = ['板南線', '淡水信義線', '中和新蘆線', '松山新店線', '文湖線']
 N_HOURS = len(ANALYSIS_HOURS)
@@ -36,13 +41,10 @@ LINE_CODE_MAP = {
     'G':  '松山新店線',
     'O':  '中和新蘆線',
     'BR': '文湖線',
-    'V':  '淡水信義線',   # 新北投支線屬淡水信義線系統
-    'Y':  '板南線',       # 環狀線在新埔與板南線交會
+    'V':  '淡水信義線',
+    'Y':  '板南線',
 }
 
-# 各轉乘站對應的路線（從 network.json transfer edges 推導）
-# key = 站名（與 flow_df['transfer_station'] 一致）
-# value = 該站實際服務的路線清單
 STATION_LINE_MAP = {
     '中山':     ['淡水信義線', '松山新店線'],
     '台北車站': ['淡水信義線', '板南線'],
@@ -63,22 +65,16 @@ STATION_LINE_MAP = {
     '北投':     ['淡水信義線'],
 }
 
-# 各路線每班次容量（估算，滿載約1000人）
 LINE_CAPACITY = {
     '板南線': 1000, '淡水信義線': 1000, '中和新蘆線': 900,
     '松山新店線': 900, '文湖線': 400
 }
 
-# ANALYSIS_HOURS 的首尾，用於 clamp
 _HOUR_MIN = min(ANALYSIS_HOURS)
 _HOUR_MAX = max(ANALYSIS_HOURS)
 
 
 def decode_individual(individual: list) -> dict:
-    """
-    將個體解碼為 {line: {hour: headway}} 的巢狀 dict。
-    key 全部為 int。
-    """
     result = {}
     for i, line in enumerate(LINES):
         result[line] = {}
@@ -89,22 +85,13 @@ def decode_individual(individual: list) -> dict:
 
 
 def _lookup_headway(headway_plan: dict, line: str, hour) -> float:
-    """
-    安全查詢班距：若 hour 不在 ANALYSIS_HOURS 內，
-    clamp 到最近的已知時段。
-    """
     h = int(hour)
     h_clamped = max(_HOUR_MIN, min(_HOUR_MAX, h))
     return headway_plan[line][h_clamped]
 
 
 def _station_avg_headway(headway_plan: dict, station: str, hour) -> float:
-    """
-    只取該轉乘站實際服務路線的平均班距。
-    若站名不在 STATION_LINE_MAP，退回全線平均（相容舊資料）。
-    """
     lines = STATION_LINE_MAP.get(station, LINES)
-    # 只保留 LINES 中有的路線，避免 KeyError
     valid_lines = [l for l in lines if l in headway_plan]
     if not valid_lines:
         valid_lines = LINES
@@ -117,12 +104,13 @@ def fitness(individual: list, flow_df: pd.DataFrame):
 
     1. 加權等待時間：
        各轉乘站 × 時段的 estimated_trips × (station_avg_headway / 2)
-       - station_avg_headway 只取該站實際服務路線，不再平均全部五條線
 
     2. 超載懲罰（二次懲罰）：
        承壓比例超過閾值時，懲罰 = trips × excess² × HEADWAY_MAX × 10
-       - 二次項讓高壓站懲罰量級遠超等待時間，迫使 GA 真正縮短擁擠站班距
-       - 係數 HEADWAY_MAX × 10 確保懲罰與等待時間同量級（不再被壓制）
+
+    3. 平滑懲罰（新增）：
+       各路線相鄰時段班距差的絕對值之和 × SMOOTH_WEIGHT
+       防止班距在相鄰時段之間大幅跳動，使建議班距曲線更平滑
     """
     headway_plan = decode_individual(individual)
     total_wait = 0.0
@@ -139,16 +127,23 @@ def fitness(individual: list, flow_df: pd.DataFrame):
 
         if ratio > PRESSURE_THRESHOLD:
             excess = ratio - PRESSURE_THRESHOLD
-            # 二次懲罰，量級對齊等待時間
             overload_penalty += trips * (excess ** 2) * HEADWAY_MAX * 10
 
-    return (total_wait + overload_penalty,)
+    # --- 平滑懲罰：相鄰時段班距差的 L1 norm ---
+    smoothness_penalty = 0.0
+    hours_sorted = sorted(ANALYSIS_HOURS)
+    for line in LINES:
+        for idx in range(len(hours_sorted) - 1):
+            h_curr = hours_sorted[idx]
+            h_next = hours_sorted[idx + 1]
+            diff = abs(headway_plan[line][h_curr] - headway_plan[line][h_next])
+            smoothness_penalty += diff
+    smoothness_penalty *= SMOOTH_WEIGHT
+
+    return (total_wait + overload_penalty + smoothness_penalty,)
 
 
 def run_ga(flow_df: pd.DataFrame, verbose: bool = True) -> dict:
-    """
-    執行 GA 最佳化，回傳最佳班距方案。
-    """
     n_genes = len(LINES) * N_HOURS
 
     if 'FitnessMin' in creator.__dict__:
@@ -194,7 +189,6 @@ def run_ga(flow_df: pd.DataFrame, verbose: bool = True) -> dict:
 
 
 def headway_to_dataframe(headway_plan: dict) -> pd.DataFrame:
-    """將班距方案轉為 DataFrame 方便輸出"""
     rows = []
     for line, hours in headway_plan.items():
         for hour, headway in hours.items():

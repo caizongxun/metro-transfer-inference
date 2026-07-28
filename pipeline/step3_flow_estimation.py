@@ -3,13 +3,13 @@ step3_flow_estimation.py
 轉乘站分時流量估算。
 
 transfer_ratio 定義：
-  營運時段（6:00~23:00）內，該站該時段旅次在全路網所有（站, 時段）組合的 percentile rank
-  深夜時段（0:00~5:00）直接設為 0，不參與百分位計算
+  營運時段（6:00~23:00）內，該站該時段旅次除以全路網最大旅次（絕對正規化）
+  深夜時段（0:00~5:00）直接設為 0，不參與計算
 
-優點：
-  - 營運時段 18 小時的細格經歷完整 0~100% 色彩分佈
-  - 小站（七張）vs 大站（台北車站）在同時段顏色會有有意義的差異
-  - 深夜盡管定義為發車時段也行，轉乘量本來就很少
+優點（相對 percentile rank）：
+  - 熱力圖顏色反映真實流量差異，高峰站才紅，低流量站保持藍色
+  - 不會因為 rank 均勻分佈導致所有格子都顯示紅色
+  - 語意直觀：1.0 = 全路網最高流量，0.5 = 半滿
 """
 
 import sys
@@ -20,7 +20,7 @@ import pandas as pd
 import numpy as np
 from pipeline.config import ANALYSIS_HOURS, PRESSURE_THRESHOLD
 
-# 營運時段定義：6:00 以後才參與 percentile rank
+# 營運時段定義：6:00 以後才參與計算
 _OPERATING_HOUR_MIN = 6
 
 
@@ -30,8 +30,8 @@ def estimate_transfer_flow(path_df: pd.DataFrame) -> pd.DataFrame:
 
     transfer_ratio 計算流程：
       1. 深夜時段（hour < 6）：ratio = 0
-      2. 營運時段（hour >= 6）：對所有 (station, hour) 的 estimated_trips 做 percentile rank
-         語意：這個格子的轉乘量在營運時段內全路網所有記錄裡排第 X %
+      2. 營運時段（hour >= 6）：estimated_trips / max(estimated_trips)
+         語意：1.0 = 全路網該時段最高轉乘流量，其餘按比例縮放
     """
     has_transfer = path_df['transfer_stations'].apply(
         lambda x: isinstance(x, list) and len(x) > 0
@@ -63,14 +63,14 @@ def estimate_transfer_flow(path_df: pd.DataFrame) -> pd.DataFrame:
     # 深夜時段直接為 0
     flow['transfer_ratio'] = 0.0
 
-    # 營運時段：對營運時段內所有 (station, hour) 的 trips 做 percentile rank
+    # 營運時段：絕對正規化，trips / max(trips)
     if is_operating.any():
         operating_trips = flow.loc[is_operating, 'estimated_trips']
-        flow.loc[is_operating, 'transfer_ratio'] = (
-            operating_trips
-            .rank(pct=True, method='average')
-            .round(4)
-        )
+        max_trips = operating_trips.max()
+        if max_trips > 0:
+            flow.loc[is_operating, 'transfer_ratio'] = (
+                (operating_trips / max_trips).round(4)
+            )
 
     flow['pressure_level'] = pd.cut(
         flow['transfer_ratio'],

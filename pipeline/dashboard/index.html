@@ -173,7 +173,7 @@
     <div class="panel active" id="panel-heatmap">
       <div class="chart-box" style="flex:1">
         <h2>轉乘站 × 時段 承壓熱力圖</h2>
-        <p>顏色越深代表該轉乘站在該時段承接的轉乘比例越高。時間軸滑動可查看當前時段各站分佈。</p>
+        <p>顏色越深代表該轉乘站在該時段承接的轉乘流量越高（相對全路網最大值）。時間軸滑動可查看當前時段各站分佈。</p>
         <div class="chart-container" id="heatmapChart"></div>
       </div>
     </div>
@@ -181,8 +181,8 @@
     <!-- Panel: Flow -->
     <div class="panel" id="panel-flow">
       <div class="chart-box" style="flex:1">
-        <h2>各轉乘站全天流量趨勢</h2>
-        <p>各轉乘站在一天中的估計承壓比例變化。以比例呈現，不受絕對人次規模影響。</p>
+        <h2>各轉乘站全天流量趨勢（營運時段 6~23 時）</h2>
+        <p>各轉乘站在營運時段的估計流量比例變化。比例以全路網最大流量為基準正規化。</p>
         <div class="chart-container" id="flowChart"></div>
       </div>
     </div>
@@ -190,8 +190,8 @@
     <!-- Panel: Headway -->
     <div class="panel" id="panel-headway">
       <div class="chart-box" style="flex:1">
-        <h2>GA 最佳化班距建議（分鐘）</h2>
-        <p>由遺傳演算法最佳化的各路線分時班距建議。目標：在車隊限制下最小化轉乘站加權等待時間。</p>
+        <h2>GA 最佳化班距建議（分鐘，營運時段 6~23 時）</h2>
+        <p>由遺傳演算法最佳化的各路線分時班距建議。含平滑懲罰項，避免相鄰時段大幅跳動。</p>
         <div class="chart-container" id="headwayChart"></div>
       </div>
     </div>
@@ -238,7 +238,6 @@ function showEmpty(title, msg) {
 }
 
 function initDashboard() {
-  // Header badges
   const src = DATA.data_source === 'private' ? '私有票卡資料' : '公開資料';
   document.getElementById('sourceBadge').textContent = src;
   if (DATA.data_source === 'private') {
@@ -262,7 +261,11 @@ function drawHeatmap() {
   const { stations, hours, values } = DATA.heatmap_matrix;
   if (!stations.length) { showEmpty('無轉乘站資料','路網中未找到有效轉乘站'); return; }
 
-  // 標記當前時段的垂直線用 shape
+  // 只顯示營運時段 hour >= 6
+  const opIdx = hours.map((h, i) => h >= 6 ? i : -1).filter(i => i >= 0);
+  const opHours = opIdx.map(i => hours[i]);
+  const opValues = values.map(row => opIdx.map(i => row[i]));
+
   const shapes = [{
     type: 'line',
     x0: currentHour - 0.5, x1: currentHour - 0.5,
@@ -274,8 +277,8 @@ function drawHeatmap() {
     paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
     font: { color: '#e2e4f0', family: 'Segoe UI, Noto Sans TC, sans-serif', size: 12 },
     margin: { t: 10, r: 20, b: 40, l: 110 },
-    xaxis: { title: '時段（小時）', tickmode: 'array', tickvals: hours,
-             ticktext: hours.map(h => h + ':00'), tickfont: { size: 11 },
+    xaxis: { title: '時段（小時）', tickmode: 'array', tickvals: opHours,
+             ticktext: opHours.map(h => h + ':00'), tickfont: { size: 11 },
              gridcolor: '#2e3249' },
     yaxis: { tickfont: { size: 11 }, autorange: 'reversed', gridcolor: '#2e3249' },
     shapes,
@@ -284,19 +287,19 @@ function drawHeatmap() {
 
   const trace = {
     type: 'heatmap',
-    z: values,
-    x: hours,
+    z: opValues,
+    x: opHours,
     y: stations,
     colorscale: [
       [0, '#1a1d27'], [0.2, '#1e3a5f'], [0.5, '#1d4ed8'],
       [0.75, '#f97316'], [1.0, '#ef4444']
     ],
-    zmin: 0, zmax: 0.35,
-    hovertemplate: '%{y}<br>%{x}:00<br>承壓比例：%{z:.1%}<extra></extra>',
+    zmin: 0, zmax: 1.0,
+    hovertemplate: '%{y}<br>%{x}:00<br>流量比例：%{z:.1%}<extra></extra>',
     showscale: true,
     colorbar: {
       tickformat: '.0%', tickfont: { color: '#8b90a8', size: 10 },
-      title: { text: '承壓比例', font: { color: '#8b90a8', size: 11 } },
+      title: { text: '流量比例', font: { color: '#8b90a8', size: 11 } },
       bgcolor: 'transparent', bordercolor: '#2e3249'
     }
   };
@@ -317,22 +320,24 @@ function updateHeatmapLine(hour) {
   });
 }
 
-// ── 各站趨勢折線圖 ──────────────────────────────
+// ── 各站趨勢折線圖（僅營運時段 >= 6）──────────────
 function drawFlowChart() {
   if (!DATA || !DATA.transfer_flow || !DATA.transfer_flow.length) {
     showEmpty('無流量資料', '請確認 step3 有輸出轉乘站資料');
     return;
   }
 
-  const stations = [...new Set(DATA.transfer_flow.map(d => d.transfer_station))];
-  const hours = [...new Set(DATA.transfer_flow.map(d => d.hour))].sort((a,b)=>a-b);
+  // 過濾掉 0~5 點
+  const opFlow = DATA.transfer_flow.filter(d => d.hour >= 6);
+  const stations = [...new Set(opFlow.map(d => d.transfer_station))];
+  const hours = [...new Set(opFlow.map(d => d.hour))].sort((a,b)=>a-b);
 
   const palette = ['#4f9cf9','#f97316','#22c55e','#eab308','#ef4444',
                    '#a855f7','#06b6d4','#ec4899','#84cc16','#f59e0b'];
 
   const traces = stations.map((st, i) => {
     const stData = hours.map(h => {
-      const row = DATA.transfer_flow.find(d => d.transfer_station === st && d.hour === h);
+      const row = opFlow.find(d => d.transfer_station === st && d.hour === h);
       return row ? row.transfer_ratio : null;
     });
     return {
@@ -340,7 +345,7 @@ function drawFlowChart() {
       name: st, x: hours.map(h => h + ':00'), y: stData,
       line: { color: palette[i % palette.length], width: 2 },
       marker: { size: 5 },
-      hovertemplate: st + ' %{x}<br>承壓比例 %{y:.1%}<extra></extra>',
+      hovertemplate: st + ' %{x}<br>流量比例 %{y:.1%}<extra></extra>',
       connectgaps: true
     };
   });
@@ -350,7 +355,7 @@ function drawFlowChart() {
     font: { color: '#e2e4f0', size: 12 },
     margin: { t: 10, r: 20, b: 40, l: 60 },
     xaxis: { title: '時段', gridcolor: '#2e3249', tickfont: { size: 11 } },
-    yaxis: { title: '承壓比例', tickformat: '.0%', gridcolor: '#2e3249', tickfont: { size: 11 } },
+    yaxis: { title: '流量比例（相對最大值）', tickformat: '.0%', gridcolor: '#2e3249', tickfont: { size: 11 } },
     legend: { bgcolor: 'transparent', font: { size: 11 } },
     hovermode: 'closest'
   };
@@ -358,20 +363,22 @@ function drawFlowChart() {
   Plotly.newPlot('flowChart', traces, layout, { responsive: true, displayModeBar: false });
 }
 
-// ── 班距建議圖 ──────────────────────────────────
+// ── 班距建議圖（僅營運時段 >= 6）────────────────
 function drawHeadwayChart() {
   if (!DATA || !DATA.headway_plan || !DATA.headway_plan.length) {
     showEmpty('無班距資料','請確認 step4 GA 最佳化有輸出結果');
     return;
   }
 
-  const lines = [...new Set(DATA.headway_plan.map(d => d.line))];
-  const hours = [...new Set(DATA.headway_plan.map(d => d.hour))].sort((a,b)=>a-b);
+  // 過濾掉 0~5 點（理論上 GA 只輸出 ANALYSIS_HOURS，但保險起見過濾）
+  const opPlan = DATA.headway_plan.filter(d => d.hour >= 6);
+  const lines = [...new Set(opPlan.map(d => d.line))];
+  const hours = [...new Set(opPlan.map(d => d.hour))].sort((a,b)=>a-b);
   const palette = ['#4f9cf9','#f97316','#22c55e','#eab308','#a855f7'];
 
   const traces = lines.map((line, i) => {
     const y = hours.map(h => {
-      const row = DATA.headway_plan.find(d => d.line === line && d.hour === h);
+      const row = opPlan.find(d => d.line === line && d.hour === h);
       return row ? row.suggested_headway_min : null;
     });
     return {
@@ -416,19 +423,18 @@ function updateSidebar(hour) {
   const peak = hourData[0];
   document.getElementById('kpiPeakStation').textContent = peak.transfer_station;
   document.getElementById('kpiPeakRatio').textContent =
-    `承壓比例 ${(peak.transfer_ratio * 100).toFixed(1)}%`;
+    `流量比例 ${(peak.transfer_ratio * 100).toFixed(1)}%`;
 
   const highCount = hourData.filter(d => d.transfer_ratio > 0.15).length;
   document.getElementById('kpiHighCount').textContent = highCount;
 
-  // 承壓條
   const maxRatio = Math.max(...hourData.map(d => d.transfer_ratio), 0.01);
   const listEl = document.getElementById('pressureBarList');
   listEl.innerHTML = hourData.slice(0, 8).map(d => {
     const pct = (d.transfer_ratio / maxRatio * 100).toFixed(0);
-    const color = d.transfer_ratio > 0.25 ? 'var(--danger)'
-                : d.transfer_ratio > 0.15 ? 'var(--accent2)'
-                : d.transfer_ratio > 0.08 ? 'var(--warn)'
+    const color = d.transfer_ratio > 0.75 ? 'var(--danger)'
+                : d.transfer_ratio > 0.50 ? 'var(--accent2)'
+                : d.transfer_ratio > 0.25 ? 'var(--warn)'
                 : 'var(--success)';
     return `<div class="bar-row">
       <span class="label" title="${d.transfer_station}">${d.transfer_station}</span>
