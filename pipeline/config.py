@@ -9,10 +9,12 @@ PUBLIC_OD_PATH = 'pipeline/data/od_hourly.csv'       # 備用：單一合併檔�
 PUBLIC_INOUT_PATH = 'pipeline/data/station_inout.csv'
 
 # 資料篩選：控制要讀哪些月份（空 list = 全部）
-# 建議一次取 3~6 個月防止 OOM，注釋原則不動
+# 建議一次取 3~6 個月防止 OOM，註釋原則不動
 FILTER_YEARS = []          # 空 = 全部年份
-FILTER_YEARMONTHS = ['202401', '202402', '202403',
-                     '202404', '202405', '202406']  # 預設取 2024 上半年
+FILTER_YEARMONTHS = ['202507', '202508', '202509',
+                     '202510', '202511', '202512',
+                     '202601', '202602', '202603',
+                     '202604', '202605', '202606']  # 2025/07 ~ 2026/06
 
 # chunk 讀取行數（每次讀多少行再彙整）— 調小可降低峰値記憶體
 CHUNK_SIZE = 50_000
@@ -37,9 +39,9 @@ HEADWAY_MIN = 2
 HEADWAY_MAX = 10
 
 # 分析時段（小時，0~23）
-ANALYSIS_HOURS = list(range(6, 24))
+ANALYSIS_HOURS = list(range(0, 24))
 
-# 轉乘站承壓警示閾值
+# 轉乘站承壓警示閾値
 PRESSURE_THRESHOLD = 0.15
 
 # 輸出路徑
