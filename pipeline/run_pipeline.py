@@ -1,6 +1,6 @@
 """
 run_pipeline.py
-全流程執行入口。依序執行 step1 ~ step5。
+全流程執行入口。依序執行 step1 ~ step5，并在 step3 後插入 step3.5 校正。
 
 執行方式：
   cd <repo root>
@@ -44,12 +44,22 @@ def main():
     print('\n[Step 3/5] 轉乘站流量估算...')
     from pipeline.step3_flow_estimation import estimate_transfer_flow, build_heatmap_matrix
     flow_df = estimate_transfer_flow(path_df)
-    heatmap_df = build_heatmap_matrix(flow_df)
     print(f'  轉乘站數：{flow_df["transfer_station"].nunique()}')
     if len(flow_df) > 0:
-        top = flow_df.sort_values('estimated_trips', ascending=False).iloc[0]
-        print(f'  最高承壓：{top["transfer_station"]} at {top["hour"]}:00 '
-              f'（比例 {top["transfer_ratio"]*100:.1f}%）')
+        top_raw = flow_df.sort_values('estimated_trips', ascending=False).iloc[0]
+        print(f'  校正前最高承壓：{top_raw["transfer_station"]} at {top_raw["hour"]}:00 '
+              f'（比例 {top_raw["transfer_ratio"]*100:.1f}%）')
+
+    # Step 3.5: 進出人次校正
+    print('\n[Step 3.5/5] 進出人次校正（step3_5_calibration）...')
+    from pipeline.step3_5_calibration import calibrate
+    flow_df = calibrate(flow_df)
+    if len(flow_df) > 0:
+        top_cal = flow_df.sort_values('estimated_trips', ascending=False).iloc[0]
+        print(f'  校正後最高承壓：{top_cal["transfer_station"]} at {top_cal["hour"]}:00 '
+              f'（scale_factor={top_cal["scale_factor"]:.3f}）')
+
+    heatmap_df = build_heatmap_matrix(flow_df)
 
     # Step 4: GA 最佳化
     print('\n[Step 4/5] GA 班距最佳化（DEAP）...')
@@ -65,8 +75,8 @@ def main():
         headway_df = pd.DataFrame()
         print('  無轉乘流量資料，跳過 GA')
 
-    # Step 5: 匙出
-    print('\n[Step 5/5] 匙出 JSON...')
+    # Step 5: 匯出
+    print('\n[Step 5/5] 匯出 JSON...')
     from pipeline.step5_export import export_to_json
     export_to_json(flow_df, heatmap_df, headway_df)
 
