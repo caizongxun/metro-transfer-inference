@@ -84,7 +84,8 @@
   }
   .chart-box h2 { font-size: 13px; font-weight: 600; color: var(--text); }
   .chart-box p { font-size: 11px; color: var(--muted); }
-  .chart-container { flex: 1; min-height: 0; }
+  /* ★ 步驟1：補上 width: 100% */
+  .chart-container { flex: 1; min-height: 0; width: 100%; }
 
   /* Timeline slider */
   .timeline-bar {
@@ -554,7 +555,7 @@ function drawHeadwayChart() {
   const layout = {
     paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
     font: { color: '#e2e4f0', size: 12 },
-    margin: { t: 10, r: 60, b: 40, l: 50 },
+    margin: { t: 40, r: 60, b: 40, l: 50 },
     xaxis: { title: '時段', gridcolor: '#2e3249', tickfont: { size: 11 } },
     yaxis: {
       title: '班距（分鐘）', gridcolor: '#2e3249', tickfont: { size: 11 },
@@ -564,7 +565,16 @@ function drawHeadwayChart() {
     },
     shapes,
     annotations,
-    legend: { bgcolor: 'transparent', font: { size: 11 } },
+    // ★ 步驟3：圖例改為橫向排列，置於圖表上方右側
+    legend: {
+      bgcolor: 'transparent',
+      font: { size: 11 },
+      orientation: 'h',
+      yanchor: 'bottom',
+      y: 1.02,
+      xanchor: 'right',
+      x: 1
+    },
   };
   Plotly.newPlot('headwayChart', traces, layout, { responsive: true, displayModeBar: false });
 }
@@ -741,12 +751,16 @@ playBtn.addEventListener('click', () => {
 });
 
 // ── Tab 切換 ──────────────────────────────────────
+// ★ 步驟2：補上 resize 事件，讓 Plotly 切換 tab 後重新撐滿寬度
 document.querySelectorAll('.tab').forEach(tab => {
   tab.addEventListener('click', () => {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
     tab.classList.add('active');
     document.getElementById('panel-' + tab.dataset.panel).classList.add('active');
+
+    // ★ 強制觸發視窗 resize，讓 Plotly 重新計算並撐滿寬度
+    window.dispatchEvent(new Event('resize'));
   });
 });
 
