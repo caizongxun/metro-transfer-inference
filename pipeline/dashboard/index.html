@@ -105,6 +105,40 @@
     border-radius: 6px; padding: 4px 8px; font-size: 12px; cursor: pointer;
   }
 
+  /* ── 班距建議 panel ── */
+  .headway-panel-inner {
+    display: flex; flex-direction: column; gap: 12px; flex: 1; min-height: 0;
+  }
+  /* 各線摘要卡片列 */
+  .hw-summary-row {
+    display: flex; gap: 10px; flex-wrap: wrap; flex-shrink: 0;
+  }
+  .hw-line-card {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 14px; min-width: 140px; flex: 1;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .hw-line-name { font-size: 11px; color: var(--muted); font-weight: 500; }
+  .hw-line-peak {
+    display: flex; align-items: baseline; gap: 6px;
+  }
+  .hw-peak-val { font-size: 22px; font-weight: 700; }
+  .hw-peak-label { font-size: 10px; color: var(--muted); }
+  .hw-line-badge {
+    display: inline-block; font-size: 10px; padding: 1px 7px;
+    border-radius: 999px; font-weight: 600; width: fit-content;
+  }
+  .hw-badge-tight { background: rgba(239,68,68,0.18); color: #ef4444; border: 1px solid rgba(239,68,68,0.3); }
+  .hw-badge-normal { background: rgba(234,179,8,0.18); color: #eab308; border: 1px solid rgba(234,179,8,0.3); }
+  .hw-badge-loose { background: rgba(34,197,94,0.18); color: #22c55e; border: 1px solid rgba(34,197,94,0.3); }
+  /* 圖例說明 */
+  .hw-legend {
+    display: flex; gap: 16px; align-items: center; flex-shrink: 0;
+    font-size: 11px; color: var(--muted);
+  }
+  .hw-legend-item { display: flex; align-items: center; gap: 6px; }
+  .hw-legend-dot { width: 12px; height: 12px; border-radius: 2px; }
+
   /* Timetable panel */
   .tt-controls {
     display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
@@ -139,7 +173,11 @@
     font-variant-numeric: tabular-nums;
   }
   .tt-table tr:hover td { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+
+  /* 尖峰整行底色 */
   .peak-row td { color: var(--accent2); }
+  .peak-row { background: rgba(249,115,22,0.06); }
+
   .tt-hour-group {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(52px, 1fr));
@@ -152,7 +190,13 @@
     text-align: center; font-variant-numeric: tabular-nums;
     color: var(--text);
   }
-  .tt-chip.peak { border-color: var(--accent2); color: var(--accent2); }
+  .tt-chip.peak { border-color: var(--accent2); color: var(--accent2); background: rgba(249,115,22,0.10); }
+
+  /* 密度長條 */
+  .density-bar-wrap { display: flex; align-items: center; gap: 6px; }
+  .density-bar-bg { width: 64px; background: var(--border); border-radius: 3px; height: 8px; overflow: hidden; flex-shrink: 0; }
+  .density-bar-fill { height: 100%; border-radius: 3px; }
+  .density-label { font-size: 11px; color: var(--muted); white-space: nowrap; }
 
   .empty-state {
     display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -230,20 +274,32 @@
       </div>
     </div>
 
-    <!-- Panel: Headway -->
+    <!-- Panel: Headway（優化版） -->
     <div class="panel" id="panel-headway">
-      <div class="chart-box" style="flex:1">
+      <div class="chart-box" style="flex:1; overflow:hidden;">
         <h2>GA 最佳化班距建議（分鐘，營運時段 6~23 時）</h2>
-        <p>由遺傳演算法最佳化的各路線分時班距建議。含平滑懲罰項，避免相鄰時段大幅跳動。</p>
-        <div class="chart-container" id="headwayChart"></div>
+        <p>由遺傳演算法最佳化的各路線分時班距建議。色帶背景代表擁擠程度：<strong style="color:#ef4444">紅</strong> ≤2 分（高密度）、<strong style="color:#eab308">黃</strong> 2–4 分（正常）、<strong style="color:#22c55e">綠</strong> &gt;4 分（離峰）。</p>
+        <div class="headway-panel-inner">
+          <!-- 各線摘要卡片 -->
+          <div class="hw-summary-row" id="hwSummaryRow"></div>
+          <!-- 圖例 -->
+          <div class="hw-legend">
+            <span>班距區間：</span>
+            <div class="hw-legend-item"><div class="hw-legend-dot" style="background:rgba(239,68,68,0.25)"></div><span>≤ 2 分（密集）</span></div>
+            <div class="hw-legend-item"><div class="hw-legend-dot" style="background:rgba(234,179,8,0.25)"></div><span>2–4 分（正常）</span></div>
+            <div class="hw-legend-item"><div class="hw-legend-dot" style="background:rgba(34,197,94,0.20)"></div><span>&gt; 4 分（疏運）</span></div>
+          </div>
+          <!-- 折線圖 -->
+          <div class="chart-container" id="headwayChart"></div>
+        </div>
       </div>
     </div>
 
-    <!-- Panel: Timetable -->
+    <!-- Panel: Timetable（優化版） -->
     <div class="panel" id="panel-timetable">
       <div class="chart-box" style="flex:1; overflow:hidden;">
         <h2>完整時刻表（Step 5T 輸出）</h2>
-        <p>由 GA 班距 + 換乘偏移推算的每條路線全天發車時刻。橘色為尖峰時段班次（班距 ≤ 4 分鐘）。</p>
+        <p>由 GA 班距 + 換乘偏移推算的每條路線全天發車時刻。橘色底色為尖峰時段班次（班距 ≤ 4 分鐘），右側長條顯示每小時班次密度。</p>
         <div class="tt-controls">
           <label>路線</label>
           <select class="tt-select" id="ttLineSelect"></select>
@@ -299,7 +355,8 @@ async function loadData() {
 
 function showEmpty(title, msg) {
   ['heatmapChart','flowChart','headwayChart'].forEach(id => {
-    document.getElementById(id).innerHTML =
+    const el = document.getElementById(id);
+    if (el) el.innerHTML =
       `<div class="empty-state"><div class="icon">📊</div><strong>${title}</strong><p>${msg}</p></div>`;
   });
 }
@@ -315,7 +372,6 @@ function initDashboard() {
   if (DATA.generated_at) {
     document.getElementById('genTime').textContent = '更新：' + DATA.generated_at.replace('T',' ');
   }
-
   drawHeatmap();
   drawFlowChart();
   drawHeadwayChart();
@@ -394,7 +450,7 @@ function drawFlowChart() {
     type: 'scatter', mode: 'lines+markers', name: st,
     x: hours.map(h => h + ':00'),
     y: hours.map(h => { const r = opFlow.find(d => d.transfer_station===st && d.hour===h); return r ? r.transfer_ratio : null; }),
-    line: { color: palette[i % palette.length], width: 2 },
+    line: { color: palette[i % palette.length], width: 2, shape: 'spline', smoothing: 0.8 },
     marker: { size: 5 },
     hovertemplate: st + ' %{x}<br>流量比例 %{y:.1%}<extra></extra>',
     connectgaps: true
@@ -411,36 +467,94 @@ function drawFlowChart() {
   Plotly.newPlot('flowChart', traces, layout, { responsive: true, displayModeBar: false });
 }
 
-// ── 班距建議圖 ────────────────────────────────────
+// ── 班距建議圖（優化版）────────────────────────────
 function drawHeadwayChart() {
   if (!DATA || !DATA.headway_plan || !DATA.headway_plan.length) {
+    document.getElementById('hwSummaryRow').innerHTML = '';
     showEmpty('無班距資料','請確認 step4 GA 最佳化有輸出結果'); return;
   }
   const opPlan = DATA.headway_plan.filter(d => d.hour >= 6);
   const lines = [...new Set(opPlan.map(d => d.line))];
   const hours = [...new Set(opPlan.map(d => d.hour))].sort((a,b)=>a-b);
   const palette = ['#4f9cf9','#f97316','#22c55e','#eab308','#a855f7'];
+
+  // ① 各線摘要卡片
+  const summaryHtml = lines.map((line, i) => {
+    const vals = hours.map(h => { const r = opPlan.find(d => d.line===line && d.hour===h); return r ? r.suggested_headway_min : null; }).filter(v => v !== null);
+    const peakMin = vals.length ? Math.min(...vals) : null;
+    const badgeClass = peakMin === null ? 'hw-badge-loose'
+                     : peakMin <= 2 ? 'hw-badge-tight'
+                     : peakMin <= 4 ? 'hw-badge-normal'
+                     : 'hw-badge-loose';
+    const badgeLabel = peakMin === null ? '無資料'
+                     : peakMin <= 2 ? '高密度'
+                     : peakMin <= 4 ? '正常'
+                     : '疏運';
+    const color = palette[i % palette.length];
+    return `<div class="hw-line-card">
+      <div class="hw-line-name" style="color:${color}">● ${line}</div>
+      <div class="hw-line-peak">
+        <span class="hw-peak-val" style="color:${color}">${peakMin !== null ? peakMin.toFixed(1) : '—'}</span>
+        <span class="hw-peak-label">分鐘（尖峰最短班距）</span>
+      </div>
+      <span class="hw-line-badge ${badgeClass}">${badgeLabel}</span>
+    </div>`;
+  }).join('');
+  document.getElementById('hwSummaryRow').innerHTML = summaryHtml;
+
+  // ② 平滑折線 + 色帶背景 shapes
+  const shapes = [];
+  // 紅帶：0~2
+  shapes.push({ type:'rect', xref:'paper', yref:'y', x0:0, x1:1, y0:0, y1:2,
+    fillcolor:'rgba(239,68,68,0.10)', line:{width:0}, layer:'below' });
+  // 黃帶：2~4
+  shapes.push({ type:'rect', xref:'paper', yref:'y', x0:0, x1:1, y0:2, y1:4,
+    fillcolor:'rgba(234,179,8,0.10)', line:{width:0}, layer:'below' });
+  // 綠帶：4~10（上界設大一點）
+  shapes.push({ type:'rect', xref:'paper', yref:'y', x0:0, x1:1, y0:4, y1:10,
+    fillcolor:'rgba(34,197,94,0.07)', line:{width:0}, layer:'below' });
+  // 色帶邊界虛線
+  [2, 4].forEach(y => shapes.push({
+    type:'line', xref:'paper', yref:'y', x0:0, x1:1, y0:y, y1:y,
+    line:{ color:'rgba(255,255,255,0.12)', width:1, dash:'dot' }
+  }));
+
+  // ③ 折線 traces（平滑）
   const traces = lines.map((line, i) => ({
     type: 'scatter', mode: 'lines+markers', name: line,
     x: hours.map(h => h + ':00'),
     y: hours.map(h => { const r = opPlan.find(d => d.line===line && d.hour===h); return r ? r.suggested_headway_min : null; }),
-    line: { color: palette[i % palette.length], width: 2 },
-    marker: { size: 5 },
-    hovertemplate: line + ' %{x}<br>建議班距 %{y:.1f} 分鐘<extra></extra>',
+    line: { color: palette[i % palette.length], width: 2.5, shape: 'spline', smoothing: 0.6 },
+    marker: { size: 6, symbol: 'circle' },
+    hovertemplate: line + ' %{x}<br>建議班距 <b>%{y:.1f} 分鐘</b><extra></extra>',
     connectgaps: true
   }));
+
+  // ④ 右軸標示說明
+  const annotations = [
+    { xref:'paper', yref:'y', x:1.01, y:1, text:'高密度', showarrow:false, font:{color:'#ef4444',size:10}, xanchor:'left' },
+    { xref:'paper', yref:'y', x:1.01, y:3, text:'正常', showarrow:false, font:{color:'#eab308',size:10}, xanchor:'left' },
+    { xref:'paper', yref:'y', x:1.01, y:5, text:'疏運', showarrow:false, font:{color:'#22c55e',size:10}, xanchor:'left' },
+  ];
+
   const layout = {
     paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
     font: { color: '#e2e4f0', size: 12 },
-    margin: { t: 10, r: 20, b: 40, l: 60 },
+    margin: { t: 10, r: 60, b: 40, l: 50 },
     xaxis: { title: '時段', gridcolor: '#2e3249', tickfont: { size: 11 } },
-    yaxis: { title: '班距（分鐘）', gridcolor: '#2e3249', tickfont: { size: 11 } },
+    yaxis: {
+      title: '班距（分鐘）', gridcolor: '#2e3249', tickfont: { size: 11 },
+      range: [0, null],
+      tickvals: [2, 4, 6, 8, 10], ticktext: ['2分','4分','6分','8分','10分']
+    },
+    shapes,
+    annotations,
     legend: { bgcolor: 'transparent', font: { size: 11 } },
   };
   Plotly.newPlot('headwayChart', traces, layout, { responsive: true, displayModeBar: false });
 }
 
-// ── 時刻表 ────────────────────────────────────────
+// ── 時刻表（優化版）──────────────────────────────
 function initTimetable() {
   const sel = document.getElementById('ttLineSelect');
   sel.innerHTML = '';
@@ -469,52 +583,73 @@ function renderTimetable() {
   const trains = (data.trains || []).sort();
   const total = data.total_trains || trains.length;
   const hwByHour = data.headway_by_hour || {};
-  const offByHour = data.offset_by_hour || {};
 
-  // KPI summary
+  // KPI summary（移除偏移欄，改為「尖峰小時數」）
   const hwVals = Object.values(hwByHour).map(Number);
   const minHw = hwVals.length ? Math.min(...hwVals).toFixed(1) : '—';
   const maxHw = hwVals.length ? Math.max(...hwVals).toFixed(1) : '—';
-  const offCount = Object.values(offByHour).filter(v => v > 0).length;
+  const peakHours = Object.values(hwByHour).filter(v => parseFloat(v) <= 4).length;
 
   document.getElementById('ttSummary').innerHTML = `
     <div class="tt-kpi"><div class="tt-kpi-label">總班次</div><div class="tt-kpi-value">${total}</div></div>
     <div class="tt-kpi"><div class="tt-kpi-label">最短班距</div><div class="tt-kpi-value">${minHw} 分</div></div>
     <div class="tt-kpi"><div class="tt-kpi-label">最長班距</div><div class="tt-kpi-value">${maxHw} 分</div></div>
-    <div class="tt-kpi"><div class="tt-kpi-label">換乘偏移時段</div><div class="tt-kpi-value">${offCount}</div></div>
+    <div class="tt-kpi" style="border-color:rgba(249,115,22,0.4)"><div class="tt-kpi-label">尖峰時段數</div><div class="tt-kpi-value" style="color:var(--accent2)">${peakHours}</div></div>
   `;
 
   const content = document.getElementById('ttContent');
 
+  // 計算各小時班次數（用於密度長條）
+  const byHour = {};
+  trains.forEach(t => {
+    const h = t.split(':')[0];
+    if (!byHour[h]) byHour[h] = [];
+    byHour[h].push(t);
+  });
+  const maxCount = Math.max(...Object.values(byHour).map(arr => arr.length), 1);
+
   if (mode === 'grid') {
-    // 按小時分組顯示時刻格
-    const byHour = {};
-    trains.forEach(t => {
-      const h = t.split(':')[0];
-      if (!byHour[h]) byHour[h] = [];
-      byHour[h].push(t);
-    });
-    const hw = parseFloat(hwByHour[Object.keys(hwByHour)[0]] || 99);
-    let html = '<table class="tt-table"><thead><tr><th style="width:64px">時段</th><th>發車時刻</th><th style="width:70px">班距(分)</th><th style="width:70px">偏移(分)</th></tr></thead><tbody>';
+    // 時刻格模式：移除「偏移(分)」欄，加右側密度長條
+    let html = '<table class="tt-table"><thead><tr>'
+      + '<th style="width:64px">時段</th>'
+      + '<th>發車時刻</th>'
+      + '<th style="width:70px">班距(分)</th>'
+      + '<th style="width:130px">班次密度</th>'
+      + '</tr></thead><tbody>';
+
     Object.keys(byHour).sort().forEach(h => {
       const rowHw = parseFloat(hwByHour[h] || 0).toFixed(1);
-      const rowOff = parseFloat(offByHour[h] || 0).toFixed(2);
       const isPeak = parseFloat(rowHw) <= 4;
+      const count = byHour[h].length;
+      const densityPct = Math.round(count / maxCount * 100);
+      // 密度長條顏色：尖峰橘、其餘藍
+      const barColor = isPeak ? 'var(--accent2)' : 'var(--accent)';
       const chipsHtml = byHour[h].map(t => `<span class="tt-chip${isPeak?' peak':''}">${t}</span>`).join('');
-      html += `<tr class="${isPeak?'peak-row':''}"><td>${h}:xx</td><td><div class="tt-hour-group">${chipsHtml}</div></td><td>${rowHw}</td><td>${rowOff}</td></tr>`;
+      const densityHtml = `<div class="density-bar-wrap">
+        <div class="density-bar-bg"><div class="density-bar-fill" style="width:${densityPct}%;background:${barColor}"></div></div>
+        <span class="density-label">${count} 班</span>
+      </div>`;
+      html += `<tr class="${isPeak?'peak-row':''}">
+        <td>${h}:xx</td>
+        <td><div class="tt-hour-group">${chipsHtml}</div></td>
+        <td>${isPeak ? `<span style="color:var(--accent2);font-weight:600">${rowHw}</span>` : rowHw}</td>
+        <td>${densityHtml}</td>
+      </tr>`;
     });
     html += '</tbody></table>';
     content.innerHTML = html;
   } else {
-    // 明細表模式
-    let html = '<table class="tt-table"><thead><tr><th>#</th><th>發車時刻</th><th>班距(分)</th><th>換乘偏移(分)</th></tr></thead><tbody>';
+    // 明細表模式：同樣移除「偏移(分)」欄
+    let html = '<table class="tt-table"><thead><tr>'
+      + '<th>#</th><th>發車時刻</th><th>班距(分)</th>'
+      + '</tr></thead><tbody>';
     trains.forEach((t, i) => {
       const h = t.split(':')[0];
       const rowHw = parseFloat(hwByHour[h] || 0).toFixed(1);
-      const rowOff = parseFloat(offByHour[h] || 0).toFixed(2);
       const isPeak = parseFloat(rowHw) <= 4;
       html += `<tr class="${isPeak?'peak-row':''}">`;
-      html += `<td style="color:var(--muted)">${i+1}</td><td>${t}</td><td>${rowHw}</td><td>${rowOff}</td></tr>`;
+      html += `<td style="color:var(--muted)">${i+1}</td><td>${t}</td>`;
+      html += `<td>${isPeak ? `<span style="color:var(--accent2);font-weight:600">${rowHw}</span>` : rowHw}</td></tr>`;
     });
     html += '</tbody></table>';
     content.innerHTML = html;
